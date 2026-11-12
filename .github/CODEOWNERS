@@ -1,0 +1,8 @@
+*                 @synthesia-ai/interactive-avatars
+/.github/         @synthesia-ai/interactive-avatars @synthesia-ai/security
+/pyproject.toml   @synthesia-ai/interactive-avatars @synthesia-ai/security
+/uv.lock          @synthesia-ai/interactive-avatars @synthesia-ai/security
+/RELEASING.md     @synthesia-ai/interactive-avatars @synthesia-ai/security
+/SECURITY.md      @synthesia-ai/interactive-avatars @synthesia-ai/security
+/.gitleaks.toml   @synthesia-ai/interactive-avatars @synthesia-ai/security
+/.pre-commit-config.yaml @synthesia-ai/interactive-avatars @synthesia-ai/security

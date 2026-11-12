@@ -1,0 +1,37 @@
+name: livekit-dev
+description: >-
+  Start a throwaway livekit-server in --dev mode and wait for it to answer, or tear it down while dumping its
+  logs. Single source of truth for the container command, the readiness poll and the teardown, shared by the
+  ci.yml `integration` and `compat-main` jobs.
+
+inputs:
+  mode:
+    description: >-
+      `start` runs the container and blocks until it is ready; `stop` dumps the container logs and removes it
+      (use with `if: always()`).
+    required: false
+    default: start
+
+runs:
+  using: composite
+  steps:
+    # `docker run` cannot live in a `services:` block: GitHub `services` cannot pass command arguments and
+    # livekit-server needs `--dev --bind 0.0.0.0`.
+    - name: Start livekit-server
+      if: ${{ inputs.mode == 'start' }}
+      shell: bash
+      run: |
+        # keep in sync with tests/integration/conftest.py and the justfile's `livekit-up`
+        docker run -d --rm --name livekit -p 7880:7880 -p 7881:7881/tcp -p 7882:7882/udp livekit/livekit-server:v1.9.1 --dev --bind 0.0.0.0 --node-ip 127.0.0.1
+
+    - name: Wait for livekit-server
+      if: ${{ inputs.mode == 'start' }}
+      shell: bash
+      run: |
+        for i in $(seq 1 40); do curl -sf http://localhost:7880/ && exit 0; sleep 0.5; done; docker logs livekit; exit 1
+
+    - name: Stop livekit-server
+      if: ${{ inputs.mode == 'stop' }}
+      shell: bash
+      run: |
+        docker logs livekit || true; docker stop livekit || true

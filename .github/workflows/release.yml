@@ -1,0 +1,132 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+# Two jobs, so that the code a release runs (dependencies, tests, the build backend) never runs in a job
+# that can mint a PyPI token: `build` checks and builds with no `id-token` permission, and `publish` only
+# downloads what `build` uploaded and publishes it.
+jobs:
+  build:
+    # A pinned image, not a moving label, for the jobs that build and sign a release (the same image as CI).
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Full history of every branch, so `origin/main` exists for the ancestry check below. Fetching it
+          # here rather than with a later `git fetch` means the clone needs no stored credential.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # A tag on a commit that is not on main (one still on a branch, say) would publish code that was never
+      # reviewed and merged. It runs before any of the commit's code. HEAD is the tagged commit: checkout leaves
+      # it there. GitHub runs this file as it is in the tagged commit, so a tag author can edit the check away:
+      # it catches mistakes, and the `pypi` reviewer and the tag ruleset are the enforcement (RELEASING.md).
+      - name: Assert the tagged commit is on main
+        run: |
+          set -euo pipefail
+          if ! git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then
+            echo "::error::origin/main is not in this clone; refusing to release without checking ancestry"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "::error::tagged commit $(git rev-parse HEAD) is not on main; tag a commit that has been merged to main"
+            exit 1
+          fi
+          echo "tagged commit $(git rev-parse HEAD) is on main"
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          # No cache: a release must not build from state an earlier workflow run left behind.
+          enable-cache: false
+
+      - run: uv sync --extra livekit --group dev
+
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pyright
+      # exactly CI's unit selection: the integration tiers need a livekit-server, and quarantine is not trusted
+      - run: uv run pytest -m "not integration and not integration_extended and not staging and not quarantine"
+
+      - name: Assert the tag matches project.version
+        env:
+          GIT_TAG: ${{ github.ref_name }}
+        run: |
+          uv run python - <<'PY'
+          import os
+          import pathlib
+          import sys
+          import tomllib
+
+          version = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"]
+          tag = os.environ["GIT_TAG"]
+          if tag != f"v{version}":
+              sys.exit(f"tag {tag!r} does not match pyproject.toml project.version {version!r} (expected 'v{version}')")
+          print(f"tag {tag} matches project.version {version}")
+          PY
+
+      - name: Assert CHANGELOG.md has a section for this version
+        run: |
+          uv run python - <<'PY'
+          import pathlib
+          import re
+          import sys
+          import tomllib
+
+          version = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"]
+          changelog = pathlib.Path("CHANGELOG.md").read_text()
+          # (?![\w.-]) and not \b: a word boundary also matches "## 0.1.0-rc1" and "## 0.1.0.dev0",
+          # so releasing 0.1.0 would pass with only a pre-release heading in the file. This rejects any
+          # heading that merely starts with the version, while still allowing "## 0.1.0 - 2026-01-01".
+          if not re.search(rf"^##\s+{re.escape(version)}(?![\w.-])", changelog, re.MULTILINE):
+              sys.exit(f"CHANGELOG.md has no '## {version}' section (see the per-release steps in RELEASING.md)")
+          print(f"CHANGELOG.md has a '## {version}' section")
+          PY
+
+      - run: uv build
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          # "Re-run all jobs" after `build` succeeded would otherwise fail here: the run already has a `dist`.
+          # Replacing it is safe because `publish` downloads `dist` from this same run, after this job.
+          overwrite: true
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    # The `pypi` environment has a required reviewer, so every release pauses for a human before an OIDC
+    # token can be minted. See RELEASING.md §1.2.
+    environment: pypi
+    # Nothing else: no step reads the repository, and downloading an artifact from the same run needs no token.
+    permissions:
+      id-token: write   # PyPI trusted publishing (OIDC) and signing the attestations. There is no PyPI token.
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
+      # No checkout: this job runs nothing from the repository, only publishes what `build` uploaded.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+
+      # Trusted publishing: no `password`, no `user`, no token. Publishes everything in dist/, each file with a
+      # PEP 740 attestation tying it to this repository and this workflow.
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          attestations: true

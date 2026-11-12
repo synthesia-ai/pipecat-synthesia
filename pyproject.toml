@@ -1,0 +1,139 @@
+[project]
+name = "pipecat-synthesia"
+version = "1.0.0"
+description = "Synthesia Interactive Avatar for Pipecat pipelines"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Synthesia" }]
+# PEP 639: an SPDX expression, and the file hatchling puts in the wheel's .dist-info/licenses/ and in the sdist.
+license = "MIT"
+license-files = ["LICENSE"]
+# pipecat-ai is allowed up to the next major (<2) on every pin below, not capped at the newest tested minor:
+# a cap stops a user whose app is already on a newer Pipecat from installing the plugin at all. The
+# minors this package is tested with are TESTED_PIPECAT_VERSIONS in src/pipecat_synthesia/_compat.py, run on
+# every PR by the `pipecat` matrix axis of the CI `unit` and `integration` jobs. The safety net for newer
+# ones is a one-time warning when the plugin runs on a newer minor than any tested, and the nightly
+# `compat-main` job, which runs Pipecat's newest release and its main branch. uv.lock stays at the oldest
+# allowed minor (1.14.0) so every PR proves the floor; never bump it in passing. The floor is 1.14 because
+# Pipecat 1.13 and older require Pillow<13, which would hold the lock on a Pillow with open advisories.
+# packaging reads the installed pipecat-ai version for that warning; Pipecat itself does not require it.
+# aiohttp (here) and pyjwt (in [livekit]) start at the first releases that fix the advisories known on
+# 2026-11-12: aiohttp sends the API key and the LiveKit token, and pyjwt reads LiveKit tokens.
+dependencies = ["pipecat-ai>=1.14,<2", "aiohttp>=3.14.5,<4", "packaging>=20"]
+
+[project.optional-dependencies]
+# pipecat-ai[livekit] is required because pipecat.transports.livekit.transport imports tenacity at module import time;
+# tenacity is NOT in pipecat core. Do not replace with a bare tenacity pin.
+livekit = ["pipecat-ai[livekit]>=1.14,<2", "livekit>=1.1.18,<2", "livekit-api>=1.2.1,<2", "pyjwt>=2.15.1,<3"]
+
+[project.urls]
+Documentation = "https://docs.synthesia.io/reference/interactive-avatars"
+Repository = "https://github.com/synthesia-ai/pipecat-synthesia"
+Changelog = "https://github.com/synthesia-ai/pipecat-synthesia/blob/main/CHANGELOG.md"
+Support = "https://github.com/synthesia-ai/pipecat-synthesia/blob/main/SUPPORT.md"
+
+[dependency-groups]
+# deliberately no [livekit] here so the [livekit] extra is load-bearing in CI, not masked
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pytest-timeout>=2",
+    "ruff>=0.6",
+    "pyright>=1.1.380",
+    "pipecat-ai[silero]>=1.14,<2",
+    # What examples/ needs to actually run. `runner` is fastapi + uvicorn, which
+    # pipecat.runner.run imports at module scope; `webrtc` is SmallWebRTCTransport (the -t webrtc
+    # path); `openai` covers both the LLM and the Realtime service behind --s2s; `cartesia` covers
+    # STT and TTS for the default pipeline. Dev-only: none of this is a dependency of the plugin.
+    "pipecat-ai[runner,webrtc,openai,cartesia]>=1.14,<2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pipecat_synthesia"]
+
+# An explicit list: without one, hatch puts every tracked file in the sdist, including tests/,
+# scripts/, tools/ and .github/, which are for maintaining the repository. Hatch adds pyproject.toml itself.
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/README.md", "/CHANGELOG.md"]
+
+[tool.uv]
+# The build backend and its dependencies, pinned: `uv build`, which makes the release, would otherwise resolve
+# whatever hatchling is newest on PyPI at release time. These are the versions uv resolved on 2026-11-05; bump
+# them on purpose, and check the wheel and sdist contents when you do.
+build-constraint-dependencies = [
+    "hatchling==1.33.0",
+    "packaging==26.3",
+    "pathspec==1.1.1",
+    "pluggy==1.7.0",
+    "tomlkit==0.15.2",
+    "trove-classifiers==2026.9.21.13",
+]
+
+# if your pip/uv config points at a private index, this keeps public PyPI as the source
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# pytest-asyncio 1.x: stated explicitly rather than left to the default, because the default is what
+# silently shares one loop between a session-scoped async fixture and the tests that use it. Every
+# async fixture here is function-scoped; a session-scoped fixture must be synchronous.
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "--strict-markers -q"
+# A backstop against a hung test, not a target: `until()` polls with a 5 s default, and the
+# integration job passes --timeout=120 on the CLI for the tests that talk to a real livekit-server.
+timeout = 30
+filterwarnings = [
+    # A task destroyed while pending, an unclosed aiohttp session: the historical Pipecat failure
+    # mode (#4547) reaches us as an unraisable exception in a __del__, which pytest reports as this
+    # warning. "Every test leaves nothing running" is only enforced if it is an error.
+    "error::pytest.PytestUnraisableExceptionWarning",
+    # Catches an un-awaited `mute_participant`, and every future forgotten await. Scope this by
+    # module (`error:coroutine 'pipecat_synthesia.*' was never awaited:RuntimeWarning`) if a third
+    # party ever trips it; never downgrade it to a warning.
+    "error:coroutine .* was never awaited:RuntimeWarning",
+]
+markers = [
+    "unit: fast, no network",
+    "integration: PR-gate integration tests; need a local livekit-server (docker) or LIVEKIT_TEST_URL",
+    "integration_extended: nightly/label-only integration tests (timing-relative, multi-client, fake-vs-real conformance)",
+    "staging: needs SYNTHESIA_API_KEY and a public LiveKit project",
+    "slow: > 5 s; still on the gate",
+    "quarantine: flaked twice; excluded from the gate, run nightly; must reference an issue",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+# ruff >= 0.16 also formats and lints the Python code blocks inside Markdown, so the README's and docs/
+# examples are held to the same standard as the source.
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "T20"]   # T20: no print() in src
+
+[tool.ruff.lint.per-file-ignores]
+# T20 (no print) is scoped to src/, per the comment on `select` above. Everything outside src/ is expected to
+# print: the maintenance scripts report what they did, the examples print run instructions, and
+# tests/staging/test_round_trip.py prints its timings.
+"scripts/*" = ["T20"]
+"examples/*" = ["T20"]
+# ASYNC109 ("use asyncio.timeout instead of a timeout parameter") is wrong for the test primitives:
+# `until`, `eventually_equal`, `EventRecorder.wait` and the harness's `h.frame` poll to a deadline and
+# must raise an `AssertionError` naming what they waited for. `asyncio.timeout` raises `TimeoutError`
+# from wherever the coroutine happened to be suspended, which is the unreadable failure these helpers
+# exist to replace. Scoped to tests/ so src/ still gets the rule.
+"tests/*" = ["T20", "ASYNC109"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingImports = "warning"
+reportUnusedCoroutine = "error"

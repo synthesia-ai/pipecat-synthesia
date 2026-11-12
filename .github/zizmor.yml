@@ -1,0 +1,10 @@
+# zizmor's configuration, found here automatically. Every entry is a finding we have looked at and
+# accepted, with the reason; anything zizmor reports that is not listed here fails CI's `lint` job.
+rules:
+  # zizmor asks for GitHub's self-repository syntax (`uses: $/.github/actions/livekit-dev`) instead of
+  # `./.github/actions/livekit-dev`. The risk it closes is a step before it replacing the action's files on
+  # disk; the steps before it are our checkout and package installs. Not switched yet: the change would
+  # need a CI run to prove it, and is left for its own PR.
+  self-repository:
+    ignore:
+      - ci.yml

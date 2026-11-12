@@ -1,0 +1,13 @@
+[project]
+name = "pipecat-synthesia-quickstart"
+version = "0.1.0"
+description = "Synthesia Interactive Avatar in a Pipecat voice bot"
+requires-python = ">=3.11"
+# [livekit] is required even though this quickstart's own transport is WebRTC: LiveKit is how the
+# rendered avatar is reached.
+dependencies = [
+    "pipecat-synthesia[livekit]>=1.0,<2",
+    # runner = the dev server behind `-t webrtc`; webrtc = SmallWebRTCTransport; silero = VAD.
+    "pipecat-ai[runner,webrtc,silero,openai,cartesia]>=1.14,<2",
+    "python-dotenv>=1,<2",
+]

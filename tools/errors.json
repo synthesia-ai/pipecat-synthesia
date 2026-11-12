@@ -1,0 +1,158 @@
+{
+  "$comment": "Reduced from the Synthesia API's error catalogue; do not edit",
+  "copied": "2026-09-17",
+  "errors": [
+    {
+      "code": "bad_request",
+      "title": "Bad request",
+      "statuses": [
+        400
+      ],
+      "canonical": true
+    },
+    {
+      "code": "validation_error",
+      "title": "Invalid request",
+      "statuses": [
+        400
+      ],
+      "canonical": true
+    },
+    {
+      "code": "unauthenticated",
+      "title": "Unauthenticated",
+      "statuses": [
+        401
+      ],
+      "canonical": true
+    },
+    {
+      "code": "feature_not_in_plan",
+      "title": "Feature not in plan",
+      "statuses": [
+        402
+      ],
+      "canonical": true
+    },
+    {
+      "code": "payment_required",
+      "title": "Payment required",
+      "statuses": [
+        402
+      ],
+      "canonical": true
+    },
+    {
+      "code": "quota_exceeded",
+      "title": "Quota exceeded",
+      "statuses": [
+        402
+      ],
+      "canonical": false
+    },
+    {
+      "code": "forbidden",
+      "title": "Forbidden",
+      "statuses": [
+        403
+      ],
+      "canonical": true
+    },
+    {
+      "code": "insufficient_scope",
+      "title": "Insufficient scope",
+      "statuses": [
+        403
+      ],
+      "canonical": true
+    },
+    {
+      "code": "not_found",
+      "title": "Not found",
+      "statuses": [
+        404
+      ],
+      "canonical": true
+    },
+    {
+      "code": "unknown_reference",
+      "title": "Unknown reference",
+      "statuses": [
+        404
+      ],
+      "canonical": false
+    },
+    {
+      "code": "method_not_allowed",
+      "title": "Method not allowed",
+      "statuses": [
+        405
+      ],
+      "canonical": true
+    },
+    {
+      "code": "conflict",
+      "title": "Conflict",
+      "statuses": [
+        409
+      ],
+      "canonical": true
+    },
+    {
+      "code": "payload_too_large",
+      "title": "Payload too large",
+      "statuses": [
+        413
+      ],
+      "canonical": true
+    },
+    {
+      "code": "unsupported_media_type",
+      "title": "Unsupported media type",
+      "statuses": [
+        415
+      ],
+      "canonical": true
+    },
+    {
+      "code": "concurrency_limit",
+      "title": "Concurrency limit exceeded",
+      "statuses": [
+        429
+      ],
+      "canonical": true
+    },
+    {
+      "code": "rate_limited",
+      "title": "Rate limit exceeded",
+      "statuses": [
+        429
+      ],
+      "canonical": true
+    },
+    {
+      "code": "internal",
+      "title": "Internal error",
+      "statuses": [
+        500
+      ],
+      "canonical": true
+    },
+    {
+      "code": "service_unavailable",
+      "title": "Service unavailable",
+      "statuses": [
+        503
+      ],
+      "canonical": true
+    },
+    {
+      "code": "timeout",
+      "title": "Upstream timeout",
+      "statuses": [
+        504
+      ],
+      "canonical": true
+    }
+  ]
+}
