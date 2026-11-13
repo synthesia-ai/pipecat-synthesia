@@ -1,0 +1,396 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # `labeled`/`unlabeled` so that adding the `skip-changelog` label re-runs the `changelog` job:
+    # `github.event.pull_request.labels` is frozen at the moment the run starts.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  schedule:
+    # nightly, for `compat-main` and `integration-extended` (every other job is gated off `schedule`)
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # `event_name` is in the key so that a push to main cannot cancel an in-flight nightly `compat-main` run
+  # (both would otherwise share github.ref = refs/heads/main).
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Every job runs on GitHub-hosted ubuntu-24.04, a pinned image, not `ubuntu-latest`: the integration tier
+# relies on that image's docker returning loopback UDP from livekit-server's published media port, so a new
+# image arrives as a reviewed PR. harden-runner is the first step of every job, pinned as in release.yml, and
+# tests/unit/test_structure.py checks both.
+# Third-party actions are pinned to a full commit SHA, with the version in a comment.
+jobs:
+  lint:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
+      # uv.lock must match pyproject.toml: every other job's `uv sync` would otherwise re-resolve, and the
+      # `lock` cells would test whatever Pipecat uv picked that day instead of the floor.
+      - run: uv lock --check
+      - run: uv sync --extra livekit --group dev
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      # pyright runs on Node; without one on PATH it downloads the newest release. Pinned, so pyright runs on
+      # the same Node every time.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - run: uv run pyright
+      # zizmor audits the workflows and the composite action: template injection, dangerous triggers, unpinned
+      # actions and the like. Pinned by version; a release's files on PyPI cannot be replaced. `uv run
+      # --no-project --with` and not `uvx`, because `uvx` ignores this project's index override, so on a
+      # machine whose uv config names a private index it cannot find zizmor. GH_TOKEN turns on the audits
+      # that ask GitHub about each pinned action: a known vulnerability, a commit that is not in the
+      # action's repository, a version comment that does not match the commit. Accepted findings, with
+      # reasons, are in .github/zizmor.yml.
+      - name: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run --no-project --with zizmor==1.31.1 zizmor .github/
+
+  unit:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12']
+        # 'lock' is uv.lock (pipecat-ai 1.14.0, the oldest allowed minor). The rest are the tested minors
+        # above it and must equal TESTED_PIPECAT_VERSIONS[1:] in src/pipecat_synthesia/_compat.py
+        # (tests/unit/test_structure.py checks). Newer 1.x releases are allowed but not run here: the
+        # nightly `compat-main` job runs the newest one, so a new Pipecat release never turns a PR red.
+        pipecat: ['lock', '1.15.0', '1.16.0']
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --extra livekit --group dev
+      # The same extras the [livekit] extra and the dev group pull, so the examples smoke loses nothing.
+      - if: matrix.pipecat != 'lock'
+        env:
+          PIPECAT_VERSION: ${{ matrix.pipecat }}
+        run: uv pip install "pipecat-ai[livekit,silero,runner,webrtc,openai,cartesia]==$PIPECAT_VERSION"
+      # --no-sync: a plain `uv run` re-syncs to the lock and would undo the install above.
+      - run: uv run --no-sync pytest -m "not integration and not integration_extended and not staging and not quarantine"
+
+  # The unit tier under asyncio debug mode, where a never-awaited coroutine, a task destroyed while
+  # pending and a callback that blocks the loop all become visible. Advisory until it has been clean
+  # for two consecutive weeks of PRs; until then, every warning it reports needs a stated cause. One
+  # Python version: this job is about runtime warnings, not version compatibility.
+  unit-strict:
+    name: unit-strict (advisory)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    env:
+      PYTHONASYNCIODEBUG: "1"
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
+          python-version: '3.12'
+      - run: uv sync --extra livekit --group dev
+      # --log-cli-level=WARNING so asyncio's "Executing <...> took N seconds" reaches stdout: pytest
+      # captures logging per test and replays it only for failures, which would hide exactly the
+      # slow-callback lines this job exists to surface. pipefail so a pytest failure is not masked
+      # by tee's exit status; `continue-on-error` above is what makes the job advisory.
+      - name: pytest (asyncio debug)
+        id: pytest
+        run: |
+          set -o pipefail
+          uv run pytest -m "not integration and not integration_extended and not staging and not quarantine" \
+            --log-cli-level=WARNING 2>&1 | tee unit-strict.log
+      # The summary exists so an agent can read the outcome from the run page without opening the
+      # log. Keep the three patterns in sync with the three warnings named at the top of this job.
+      - name: Summarise asyncio warnings
+        if: always()
+        env:
+          PYTEST_OUTCOME: ${{ steps.pytest.outcome }}
+        run: |
+          set -uo pipefail
+          {
+            echo "## unit-strict (advisory)"
+            echo
+            echo "pytest step outcome: \`${PYTEST_OUTCOME}\`"
+            echo
+            if [ -f unit-strict.log ]; then
+              matches="$(grep -n -E 'never awaited|destroyed but it is pending|Executing <' unit-strict.log || true)"
+              if [ -n "$matches" ]; then
+                echo "Warnings to explain in the pull request (first 100):"
+                echo
+                echo '```'
+                printf '%s\n' "$matches" | head -100
+                echo '```'
+              else
+                echo "**unit-strict clean** - no un-awaited coroutines, no tasks destroyed while pending,"
+                echo "no slow callbacks."
+              fi
+            else
+              echo "No pytest output was captured; the step above failed before pytest ran."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The `[livekit]` extra must carry everything `pipecat_synthesia.livekit` needs without the dev group.
+  install-smoke:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
+      - run: uv run --isolated --no-dev --extra livekit python -c "import pipecat_synthesia.livekit; import pipecat_synthesia"
+
+  integration:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        pipecat: ['lock', '1.15.0', '1.16.0']
+    env:
+      # Setting these forces the `livekit_server` fixture onto its never-skip path, so a broken server
+      # fails the job loudly instead of quietly skipping every integration test.
+      LIVEKIT_TEST_URL: ws://localhost:7880
+      LIVEKIT_TEST_API_KEY: devkey
+      LIVEKIT_TEST_API_SECRET: secret
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
+      - run: uv sync --extra livekit --group dev
+      - if: matrix.pipecat != 'lock'
+        env:
+          PIPECAT_VERSION: ${{ matrix.pipecat }}
+        run: uv pip install "pipecat-ai[livekit,silero,runner,webrtc,openai,cartesia]==$PIPECAT_VERSION"
+      - name: Start livekit-server
+        uses: ./.github/actions/livekit-dev
+        with:
+          mode: start
+      # --no-sync: a plain `uv run` re-syncs to the lock and would undo the install above.
+      - run: uv run --no-sync pytest -m integration --timeout=120
+      - name: Stop livekit-server
+        if: always()
+        uses: ./.github/actions/livekit-dev
+        with:
+          mode: stop
+
+  # The timing-relative and multi-client integration tests, plus anything in
+  # quarantine. Never on the gate: nightly by schedule, or on a PR by adding the `integration-extended`
+  # label. Advisory (`continue-on-error`) because a test lives here precisely while it is not yet trusted
+  # to be right every time -- a red nightly is a thing to read, not a thing that blocks a merge.
+  integration-extended:
+    name: integration-extended (advisory)
+    if: >-
+      github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch'
+      || contains(github.event.pull_request.labels.*.name, 'integration-extended')
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    env:
+      LIVEKIT_TEST_URL: ws://localhost:7880
+      LIVEKIT_TEST_API_KEY: devkey
+      LIVEKIT_TEST_API_SECRET: secret
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
+      - run: uv sync --extra livekit --group dev
+      - name: Start livekit-server
+        uses: ./.github/actions/livekit-dev
+        with:
+          mode: start
+      # `quarantine` rides along: a test that flaked twice on the gate moves there, and this is
+      # the job that keeps running it, so it is either fixed or deleted rather than forgotten.
+      - run: uv run pytest -m "integration_extended or quarantine" --timeout=120
+      - name: Stop livekit-server
+        if: always()
+        uses: ./.github/actions/livekit-dev
+        with:
+          mode: stop
+
+  changelog:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # full history so the base commit is actually present -- a `git diff` against a ref this
+          # clone never fetched reports no changes and would make this job silently useless.
+          fetch-depth: 0
+          # The fetch below is only a fallback, and fails harmlessly on a private repo without the
+          # credential; the check after it still refuses a missing base commit.
+          persist-credentials: false
+      - name: Require a CHANGELOG.md entry for src/ changes
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-changelog') }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --quiet origin "$BASE_SHA" || true
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "::error::base commit $BASE_SHA is not in this clone; refusing to diff against a missing ref"
+            exit 1
+          fi
+          changed="$(git diff --name-only "$BASE_SHA" HEAD)"
+          echo "changed files:"
+          echo "$changed"
+          if printf '%s\n' "$changed" | grep -q '^src/' && ! printf '%s\n' "$changed" | grep -qx 'CHANGELOG\.md'; then
+            echo "::error::this PR changes src/ but not CHANGELOG.md; add an entry or label the PR 'skip-changelog'"
+            exit 1
+          fi
+
+  # The one check name branch protection requires: every job that gates a pull request. The advisory
+  # jobs (`unit-strict`, `integration-extended`) are left out on purpose. `unit` and `integration` are
+  # matrices, so their checks are named "unit (3.11, lock)" and so on, and a required check named `unit`
+  # would never report. `always()` makes this job run, and fail, when a job it needs failed or was
+  # cancelled; without it the job would be skipped, which branch protection counts as passing. Pull
+  # requests only, like `changelog`.
+  required:
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs: [lint, unit, install-smoke, integration, changelog]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+      - name: Require every gating job to have succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          if ! echo "$RESULTS" | jq -e 'to_entries | all(.value.result == "success")' > /dev/null; then
+            echo "::error::lint, unit, install-smoke, integration and changelog must all succeed"
+            exit 1
+          fi
+
+  # Early warning for breakage against Pipecat versions the PR matrix does not run, in two cells. `main`
+  # runs Pipecat's main branch, the next minor before it is released. `release` answers one question:
+  # does the plugin work with the newest pipecat-ai 1.x on PyPI, which any user can install since every
+  # 1.x is allowed, with everything else held at uv.lock? It moves only pipecat-ai and what that release
+  # requires, so a red cell points at Pipecat. It does not answer whether a user's fresh install works,
+  # where every other dependency is newest too. Never runs on a PR, so a red cell blocks no merge; it is
+  # the signal to check the plugin against that Pipecat before users meet it, and to fix it or exclude
+  # that version.
+  compat-main:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        source: ['main', 'release']
+    env:
+      LIVEKIT_TEST_URL: ws://localhost:7880
+      LIVEKIT_TEST_API_KEY: devkey
+      LIVEKIT_TEST_API_SECRET: secret
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
+      - run: uv sync --extra livekit --group dev
+      - name: Install pipecat-ai from main
+        if: matrix.source == 'main'
+        run: uv pip install --upgrade "pipecat-ai[livekit] @ git+https://github.com/pipecat-ai/pipecat.git"
+      # The same extras the PR matrix installs, so the examples' tests lose nothing. --upgrade-package, not
+      # --upgrade: only pipecat-ai and what the new release requires move; everything else stays at the lock.
+      # No pre-releases: uv skips them unless asked. <2 because the plugin allows no 2.x.
+      - name: Install the newest pipecat-ai release
+        if: matrix.source == 'release'
+        run: uv pip install --upgrade-package pipecat-ai "pipecat-ai[livekit,silero,runner,webrtc,openai,cartesia]<2"
+      # Fails the cell if what stayed at the lock no longer satisfies what the new release requires.
+      - name: Check the installed requirements are consistent
+        if: matrix.source == 'release'
+        run: uv pip check
+      # So the run page says which Pipecat this cell tested: the version, and for a git install the commit,
+      # which uv records in direct_url.json (PEP 610).
+      - name: Report the installed pipecat-ai
+        run: |
+          set -o pipefail
+          uv run --no-sync python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import importlib.metadata, json
+          dist = importlib.metadata.distribution("pipecat-ai")
+          vcs = json.loads(dist.read_text("direct_url.json") or "{}").get("vcs_info", {})
+          print(f"pipecat-ai {dist.version}" + (f" (commit {vcs['commit_id']})" if "commit_id" in vcs else ""))
+          PY
+      - name: Record the installed packages
+        if: matrix.source == 'release'
+        run: |
+          set -o pipefail
+          { echo; echo '```'; uv pip freeze; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Start livekit-server
+        uses: ./.github/actions/livekit-dev
+        with:
+          mode: start
+      # --no-sync everywhere below: a plain `uv run` would re-sync the environment and undo the install.
+      - run: uv run --no-sync pytest -m "not integration and not integration_extended and not staging and not quarantine"
+      - run: uv run --no-sync pytest -m integration --timeout=120
+      - name: Stop livekit-server
+        if: always()
+        uses: ./.github/actions/livekit-dev
+        with:
+          mode: stop

@@ -1,0 +1,18 @@
+# gitleaks: the default rules, plus an allowlist for the made-up credentials the tests use.
+[extend]
+useDefault = true
+
+# Values only, no `paths`: with `condition = "AND"` and `paths = ['^tests/']`, gitleaks v8.30.1 let any other
+# value under tests/ through (tested 2026-11-12). Anchored exact values are stricter; keep them that way.
+[[allowlists]]
+description = """Placeholder credentials in the unit tests, which assert that no credential reaches a log \
+line or an error. Each value is visibly fake. Only these exact values are allowed, so a real credential \
+under tests/ is still reported."""
+regexes = [
+    # tests/support/secrets.py: the API key and LiveKit secret every redaction test checks for.
+    '''^sk-TESTSECRET-9f3a$''',
+    '''^LKSECRET-7c1d$''',
+    # tests/unit/test_transport_room.py: two LiveKit API keys, so "neither key is logged" can be asserted.
+    '''^APIbotKEY7w3q$''',
+    '''^APImintKEY2k9x$''',
+]

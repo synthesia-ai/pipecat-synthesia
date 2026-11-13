@@ -1,0 +1,46 @@
+# Python bytecode / build artefacts
+__pycache__/
+*.py[cod]
+*.so
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Environments (uv creates .venv; --python <v> runs may leave siblings)
+.venv/
+.venv*/
+venv/
+
+# Secrets and local config. .env.example is the tracked template and must NOT be ignored.
+.env
+.env.*
+!.env.example
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pytype/
+.dmypy.json
+
+# Coverage and test output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+junit*.xml
+
+# Editors and OS
+.DS_Store
+.idea/
+*.swp
+
+# Local coding-agent configuration
+.claude/
+
+# Logs and scratch
+*.log
+
+tmp/
