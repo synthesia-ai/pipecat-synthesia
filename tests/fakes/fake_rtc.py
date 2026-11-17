@@ -21,6 +21,9 @@ source (livekit rtc 1.1.19), and each such rule has a comment beside it:
 * a `perform_rpc` answer scripted with `reply_after(seconds, ...)` arrives only if it comes within the
   window rtc gives the worker's handler, max(response_timeout - max_round_trip_latency, 1 s), and is
   `RpcError(RESPONSE_TIMEOUT)` at the end of that window otherwise (livekit-rpc `client.rs`).
+* a `perform_rpc` scripted with `ack_when(event, ...)` is acknowledged only when `event` is set, and fails
+  with `RpcError(CONNECTION_TIMEOUT)` once `max_round_trip_latency` (rtc's 7 s default when None) passes
+  without it (livekit-rpc `client.rs`).
 
 `tests/integration/test_wire_conformance.py` runs the same scenarios against real rtc and a real
 `livekit-server` and compares the outcomes; any divergence it finds is fixed here or listed below.
@@ -54,8 +57,9 @@ Against livekit-server 1.9.1 and livekit rtc 1.1.19 the conformance tests found 
 * a `stream_bytes` that fails *after* being recorded (`fail_next_open`) leaves the stream recorded and
   counted as open, because rtc sends the open request before awaiting it, and the header may already
   be on the wire.
-* `reply_after` acknowledges at once, so the acknowledgement timeout is not modelled: real rtc fails the
-  call with `RpcError(CONNECTION_TIMEOUT)` when no acknowledgement comes within `max_round_trip_latency`.
+* every scripted answer except `ack_when` is acknowledged at once, so for those the acknowledgement timeout
+  is not modelled: real rtc fails the call with `RpcError(CONNECTION_TIMEOUT)` when no acknowledgement comes
+  within `max_round_trip_latency`. Script `ack_when` for a worker that acknowledges late or never.
 * `never_returns` hangs past the worker-side deadline until the caller's own timeout, where real rtc's
   handler side answers `RpcError(RESPONSE_TIMEOUT)` once that deadline passes.
 
@@ -91,6 +95,7 @@ __all__ = [
     "FakeRemoteParticipant",
     "FakeRoom",
     "FakeTrackPublication",
+    "ack_when",
     "never_returns",
     "reply_after",
 ]
@@ -132,6 +137,29 @@ def reply_after(seconds: float, response: str | BaseException) -> _ReplyAfter:
     that window the call raises `RpcError(RESPONSE_TIMEOUT)`, at the end of the window, as rtc does.
     """
     return _ReplyAfter(seconds, response)
+
+
+class _AckWhen:
+    """A `perform_rpc` that the worker acknowledges once `event` is set; see `ack_when`."""
+
+    def __init__(self, event: asyncio.Event, response: object) -> None:
+        self.event = event
+        self.response = response
+
+    def __repr__(self) -> str:
+        return f"ack_when({self.event!r}, {self.response!r})"
+
+
+def ack_when(event: asyncio.Event, response: object) -> _AckWhen:
+    """Script a worker that acknowledges the request only once `event` is set, then answers `response` at once
+    (`script_rpc(method, ack_when(learned_of_the_bot, ok))`).
+
+    Models a worker whose LiveKit connection learns of the bot late: the request waits until it does. If
+    `max_round_trip_latency` (rtc's default when None) passes first, the call raises
+    `RpcError(CONNECTION_TIMEOUT)` at that moment, as rtc does (livekit-rpc `client.rs`). An event that is
+    never set models a worker that never acknowledges. `response` is anything `script_rpc` takes.
+    """
+    return _AckWhen(event, response)
 
 
 class FakeByteStreamWriter:
@@ -330,8 +358,8 @@ class FakeLocalParticipant:
     def script_rpc(self, method: str, *responses: object) -> None:
         """Queue what the next `perform_rpc(method=...)` calls return.
 
-        Each entry is a `str` to return, a `BaseException` to raise, `never_returns`, or `reply_after(...)`.
-        The last entry repeats, so a single value scripts every call.
+        Each entry is a `str` to return, a `BaseException` to raise, `never_returns`, `reply_after(...)`, or
+        `ack_when(...)`. The last entry repeats, so a single value scripts every call.
         """
         self._scripted.setdefault(method, []).extend(responses)
 
@@ -360,6 +388,9 @@ class FakeLocalParticipant:
                 f"call script_rpc({method!r}, ...) in the test"
             )
         response = queued[0] if len(queued) == 1 else queued.pop(0)
+        if isinstance(response, _AckWhen):
+            # first, so its answer then goes through every check below
+            response = await self._ack_when(response, max_round_trip_latency)
         if isinstance(response, _ReplyAfter):
             response = await self._reply_after(response, response_timeout, max_round_trip_latency)
         if isinstance(response, BaseException):
@@ -367,6 +398,18 @@ class FakeLocalParticipant:
         if isinstance(response, _NeverReturns):
             await asyncio.Event().wait()  # cancelled by the caller's wait_for
         return str(response)
+
+    @staticmethod
+    async def _ack_when(ack_when: _AckWhen, max_round_trip_latency: float | None) -> object:
+        # livekit-rpc `client.rs`: a request with no acknowledgement within `max_round_trip_latency` fails
+        # with CONNECTION_TIMEOUT at that moment
+        ack = _RTC_MAX_ROUND_TRIP_LATENCY_SECS if max_round_trip_latency is None else max_round_trip_latency
+        try:
+            await asyncio.wait_for(ack_when.event.wait(), ack)
+        except TimeoutError:
+            code = lk_rtc.RpcError.ErrorCode.CONNECTION_TIMEOUT
+            raise lk_rtc.RpcError(code, "Connection timeout") from None
+        return ack_when.response
 
     @staticmethod
     async def _reply_after(
