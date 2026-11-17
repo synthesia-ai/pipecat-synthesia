@@ -27,23 +27,37 @@ from typing import Any
 
 import pytest
 from livekit import rtc as lk_rtc
-from pipecat.frames.frames import InterruptionFrame, TTSStartedFrame, TTSStoppedFrame
+from pipecat.frames.frames import (
+    EndFrame,
+    InterruptionFrame,
+    TTSAudioRawFrame,
+    TTSStartedFrame,
+    TTSStoppedFrame,
+)
 
 from pipecat_synthesia.livekit import _types
 from pipecat_synthesia.protocol import RPC_CLEAR_BUFFER, RPC_HANDLER_RESPONSE, RPC_REACHABILITY_PROBE
 from pipecat_synthesia.service import ServiceState
-from tests.fakes.fake_rtc import ack_when, never_returns
+from tests.fakes.fake_rtc import FakeRemoteParticipant, ack_when, never_returns
 from tests.fakes.fake_session_api import FakeSessionApiClient
 from tests.harness import Harness, bidirectional_pipeline, make_service
 from tests.support.events import EventRecorder
 from tests.support.waiting import until
-from tests.unit._service_helpers import AUDIO_1, AUDIO_2, processed, records_at, tts_audio
-from tests.unit._session_rig import AVATAR, GRACE_MARGIN, Rig, SessionRigRoom, launched
+from tests.unit._service_helpers import AUDIO_1, AUDIO_2, AUDIO_3, processed, records_at, tts_audio
+from tests.unit._session_rig import (
+    AVATAR,
+    GRACE_MARGIN,
+    STANDARD,
+    Rig,
+    SessionRigRoom,
+    launched,
+    settle,
+)
 
 GREETING = AUDIO_1
 ANSWER = AUDIO_2
 CODES = lk_rtc.RpcError.ErrorCode
-#: The probe task's name, which is how test 5 finds it among the loop's tasks.
+#: The probe task's name, which is how a test finds it among the loop's tasks.
 PROBE_TASK = "synthesia-reachability-probe"
 #: How long "and nothing was sent" is watched for; an input, not an outcome.
 NOTHING_HAPPENS = GRACE_MARGIN
@@ -66,9 +80,14 @@ def probe_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
     return records_at(caplog, logging.WARNING, "reachability probe")
 
 
-async def _utterance(h: Harness, context_id: str, audio: bytes) -> None:
+def probe_running() -> bool:
+    return any(task.get_name() == PROBE_TASK and not task.done() for task in asyncio.all_tasks())
+
+
+async def _utterance(h: Harness, context_id: str, *chunks: bytes) -> None:
     await h.queue(TTSStartedFrame(context_id=context_id))
-    await h.queue(tts_audio(context_id, audio))
+    for chunk in chunks:
+        await h.queue(tts_audio(context_id, chunk))
     await h.queue(TTSStoppedFrame(context_id=context_id))
 
 
@@ -140,6 +159,65 @@ async def test_an_interruption_while_the_probe_waits_does_not_block_the_next_rep
     assert errors == [], caplog_loguru.text
 
 
+@pytest.mark.unit
+async def test_a_graceful_stop_while_the_probe_waits_sends_the_goodbye_once_it_is_answered() -> None:
+    """The app stops while the goodbye is held behind the probe. The hold still applies during the stop's
+    drain: nothing goes out until the worker answers, then the whole goodbye does, once, in order, and the
+    stop finishes inside its drain timeout with no probe left running.
+
+    Sabotage: `sending` ignores the probe's task. The goodbye then goes out before the worker answers."""
+    learned = asyncio.Event()
+    rig = Rig(probe_answer=ack_when(learned, unsupported_method()))
+    service = make_service(SessionRigRoom(rig), stop_drain_timeout=2.0)
+
+    async with bidirectional_pipeline(service) as h:
+        await until(lambda: service.state is ServiceState.SESSION_ACTIVE, what="the session active")
+        await until(lambda: bool(probe_calls(rig)), what="the reachability probe")
+        await _utterance(h, "goodbye", AUDIO_1, AUDIO_2, AUDIO_3)
+        await processed(h, "the goodbye queued")
+        await h.queue(EndFrame())  # a graceful stop
+        await asyncio.sleep(NOTHING_HAPPENS)
+        assert rig.participant.streams == [], "the goodbye went out before the worker answered the probe"
+
+        learned.set()
+        await until(
+            lambda: bool(rig.participant.streams) and rig.participant.streams[0].closed, what="the goodbye"
+        )
+
+    assert [stream.writes for stream in rig.participant.streams] == [[AUDIO_1, AUDIO_2, AUDIO_3]]
+    assert not probe_running()
+
+
+@pytest.mark.unit
+async def test_a_leave_while_the_probe_waits_hands_the_held_greeting_over_voice_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The avatar leaves while the greeting is held behind a probe that is never answered, with a human still
+    in the room, so the leave is unexpected. The bot goes on voice-only: the held greeting reaches the user
+    whole and in order, none of it reaches the avatar, and the close stops the probe.
+
+    Sabotage: drop the probe's cancel from the close (`_close_everything`). The probe then outlives the
+    session."""
+    monkeypatch.setattr(_types, "REACHABILITY_PROBE_SECS", LONG_BOUND)
+    rig = Rig(probe_answer=never_returns)
+    rig.room.add_participant(FakeRemoteParticipant("user", kind=STANDARD))
+    service = make_service(SessionRigRoom(rig), required=False, stop_drain_timeout=0.2)
+
+    async with bidirectional_pipeline(service) as h:
+        await until(lambda: service.state is ServiceState.SESSION_ACTIVE, what="the session active")
+        await until(lambda: bool(probe_calls(rig)), what="the reachability probe")
+        await _utterance(h, "greeting", AUDIO_1, AUDIO_2)
+        await processed(h, "the greeting queued")
+        assert rig.avatar is not None
+        rig.depart(rig.avatar, reason=lk_rtc.DisconnectReason.CLIENT_INITIATED)  # a leave, not a replacement
+        await until(
+            lambda: [f.audio for f in h.down if isinstance(f, TTSAudioRawFrame)] == [AUDIO_1, AUDIO_2],
+            what="the greeting voice-only",
+        )
+        assert rig.participant.streams == [], "the greeting reached the avatar"
+        await until(lambda: not probe_running(), what="the probe stopped by the close")
+
+
 # ------------------------------------------------------------------------------------------- the session
 
 
@@ -183,6 +261,25 @@ async def test_no_answer_within_the_bound_sends_anyway_warns_once_and_never_retr
         await asyncio.sleep(10 * SHORT_BOUND)
         assert len(probe_calls(rig)) == 1, "the probe was sent again"
         assert len(probe_warnings(caplog_loguru)) == 1, caplog_loguru.text
+
+
+@pytest.mark.unit
+async def test_a_worker_that_acknowledges_but_never_answers_ends_the_hold_at_the_cap_with_one_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog_loguru: pytest.LogCaptureFixture
+) -> None:
+    """A worker acknowledges the probe at once and never answers it. Only the outer cap on the whole call,
+    the bound plus 1.5 s, ends it: with a 0.1 s bound, by about 1.6 s. Here the 2.5 s timeout is the
+    assertion. The hold ends, with exactly one warning, and the probe was sent once.
+
+    Sabotage: raise the outer cap far past the bound (`within + 1000` in `perform_reachability_probe`), and
+    the hold outlasts the timeout; or catch only `RpcError` in `_probe_reachability`, and the cap's
+    `TimeoutError` ends the probe with no warning."""
+    monkeypatch.setattr(_types, "REACHABILITY_PROBE_SECS", SHORT_BOUND)
+    async with launched(probe_answer=never_returns) as (rig, session):
+        await asyncio.wait_for(session.wait_sending(), 2.5)
+        assert session.sending
+        assert len(probe_warnings(caplog_loguru)) == 1, caplog_loguru.text
+        assert len(probe_calls(rig)) == 1
 
 
 @pytest.mark.unit
@@ -266,3 +363,27 @@ async def test_the_probe_starts_as_the_launch_ends_not_at_the_first_audio() -> N
     Sabotage: start the probe lazily, from `send_audio` or `wait_sending`."""
     async with launched() as (rig, _session):
         await until(lambda: bool(probe_calls(rig)), what="the reachability probe, with no audio sent")
+
+
+@pytest.mark.unit
+async def test_the_probe_goes_out_only_once_the_avatar_has_joined() -> None:
+    """The 201 is in, but the avatar has not joined yet: no probe goes out, because until this launch's
+    avatar is in the room, a stale one with the same identity may be, and its answer would prove nothing.
+    Once the avatar joins and the launch ends, the probe goes out.
+
+    Sabotage: start the probe at the top of `_finish_launch`, before the wait for the 201 and the join."""
+    rig = Rig(avatar_present=False)
+    task = rig.launch_task()
+    try:
+        await until(lambda: rig.api.returned == 1, what="the 201")
+        await asyncio.sleep(NOTHING_HAPPENS)
+        assert not task.done(), "the launch returned with no avatar in the room"
+        assert probe_calls(rig) == [], "the probe went out before the avatar joined"
+
+        rig.join()
+        await until(task.done, what="the launch, once the avatar joined")
+        await until(lambda: bool(probe_calls(rig)), what="the reachability probe")
+    finally:
+        await settle(task)
+        if not task.cancelled() and task.exception() is None:
+            await task.result().aclose()

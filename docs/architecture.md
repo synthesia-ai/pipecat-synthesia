@@ -530,6 +530,9 @@ relayed join does not overlap; it registers the handlers, then sends the request
 - *Fail open:* with no answer, the audio is sent anyway, with one warning.
 - *The hold is the probe's task:* `sending` is False until the task has finished, however it
   finishes, so the close only cancels it.
+- *Not covered:* a worker that replaces the first under the same identity (a restart, or the worker of a
+  retried session request) gets no probe of its own, so its first audio is sent unheld, as before this
+  rule. If the replacement happens while the probe waits, the probe's failure warning is logged too.
 - *Rejected:* resending when no `playback_started` comes (a held copy and the resend would both play);
   an unmeasured fixed delay.
 
