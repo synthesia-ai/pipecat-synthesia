@@ -8,8 +8,8 @@ only in a new major version. Breaking changes are marked **BREAKING** (see `RELE
 - The greeting is no longer lost when the user is in the room before the bot starts. The avatar worker can
   take up to about a second after its video appears to see the bot, and audio sent before then never
   reached it. The first audio now waits for the worker to answer one request (the *reachability probe*):
-  about 0.2 s when the worker has already seen the bot, about 3 s at most, after which it is sent anyway
-  with a warning.
+  about 0.2 s when the worker has already seen the bot. If the worker never answers, the audio is sent
+  anyway after about 3 s, with a warning.
 
 ## 1.0.0 - 2026-11-12
 
