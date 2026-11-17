@@ -103,8 +103,9 @@ when the session request fails once the session is already active.
    - *Early start*: if this launch's avatar publishes its video before the 201, the launch finishes
      without waiting for the 201, which typically trails the video by about half a second.
 2. **Session active.** The send loop starts writing the send queue to the worker once the *reachability
-   probe* has finished, normally within a second, one byte stream per utterance. The service fires `on_avatar_connected` once the 201 is in, which after an early start is
-   just after; `on_avatar_ready` fires after it, once every session avatar is prepared.
+   probe* has finished, normally within a second, one byte stream per utterance. The service fires
+   `on_avatar_connected` once the 201 is in, which after an early start is just after; `on_avatar_ready`
+   fires after it, once every session avatar is prepared.
 3. **End.** The pipeline stops or is cancelled, or the avatar leaves.
    - A graceful stop first lets the send queue **drain** and the last utterance finish playing, for up
      to 5 s.
