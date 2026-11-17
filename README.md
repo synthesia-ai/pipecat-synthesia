@@ -272,7 +272,7 @@ video goes away mid-call.
 
 **Speech produced before the session is active is buffered, not lost.** Starting the service does
 not block your pipeline: if your bot begins talking while the avatar is still launching, that audio
-is held and sent once the session is active, which can be up to about half a second before
+is held and sent once the session is active and the avatar worker can receive it, which can be before
 `on_avatar_connected` (see Events). The buffer is bounded, so a very long head start is truncated
 rather than growing without limit — when that happens it is reported as `prelaunch_dropped_bytes` in
 the metrics rather than passing silently.
@@ -294,8 +294,9 @@ reply still being produced when the user speaks again. Three consequences:
   interrupts only when a user turn starts, so nothing stops it until their next one.
 - Once the session is active, an interruption clears audio the avatar has not begun playing, as any
   interruption of unplayed audio does in Pipecat. The session usually becomes active as the avatar's
-  video appears, so a user who starts speaking in the first second or so after seeing the avatar, before
-  its first words play, still cuts off a greeting they have not heard.
+  video appears, so a user who starts speaking after seeing the avatar but before its first words play
+  still cuts off a greeting they have not heard. That window is usually about a second, and up to about
+  a second and a half when the avatar worker sees the bot late.
 
 Environment variables are listed in [`.env.example`](https://github.com/synthesia-ai/pipecat-synthesia/blob/main/.env.example).
 

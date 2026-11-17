@@ -36,7 +36,7 @@ header") has passed.
 | --- | --- | --- |
 | `lk.*` — `lk.audio_stream`, `lk.clear_buffer`, `lk.playback_started`, `lk.playback_finished`, `lk.publish_on_behalf` | **LiveKit.** Part of the `livekit-agents` avatar data-stream protocol. | Use as specified; never extend. A name we invent under `lk.*` will collide with a future LiveKit release. |
 | `swapAvatar`, `avatar_ready`, `avatar_status`, `avatar_audio`, `avatar_video` | **Synthesia.** Pre-existing worker protocol, inherited from `livekit-plugins-synthesia`. | Additive-only. These are already deployed and cannot be renamed. |
-| `synthesia.*` — `synthesia.protocol`, `synthesia.client`, `synthesia.join_mode`, `synthesia.launch` | **Synthesia, new.** Anything this plugin introduces. | All new names go here. The namespace exists so that anything we add is unmistakably ours. |
+| `synthesia.*` — `synthesia.protocol`, `synthesia.client`, `synthesia.join_mode`, `synthesia.launch`, `synthesia.reachability_probe` | **Synthesia, new.** Anything this plugin introduces. | All new names go here. The namespace exists so that anything we add is unmistakably ours. |
 
 Because the middle row was inherited rather than designed, it does not follow the `synthesia.*`
 convention. That is a fact to work around, not a precedent to extend: **new names go in
@@ -50,7 +50,8 @@ The plugin must keep working against a worker that predates any feature it knows
 `UNSUPPORTED_METHOD`. That is a normal answer from an older worker, not a failure of the call, and
 it must never take down a session. `error_from_rpc` maps it to `ErrorType.CONNECTION` with the
 LiveKit code preserved on `.code`, so a caller can tell "this worker is too old" from "this worker
-is broken".
+is broken". The *reachability probe* relies on exactly this answer, and that is why no worker registers
+its method (below).
 
 The full mapping (`src/pipecat_synthesia/livekit/rpc.py`):
 
@@ -61,6 +62,19 @@ The full mapping (`src/pipecat_synthesia/livekit/rpc.py`):
 | `RESPONSE_TIMEOUT`, `CONNECTION_TIMEOUT` | `TIMEOUT` | Retryable. |
 | `APPLICATION_ERROR` | `AVATAR_SWAP_FAILED` | The worker ran the method and it failed. |
 | anything else | `CONNECTION` | Code and message preserved verbatim in the message. |
+
+**The reachability probe.** As each session's launch ends, the plugin sends the avatar worker one
+`synthesia.reachability_probe` request, and holds the bot's audio until it is answered, or for a bounded
+time. No worker registers the method, so LiveKit's SDK on the worker's side answers it with
+`UNSUPPORTED_METHOD`, without running any worker code, and only once the worker's connection knows the bot.
+The plugin takes that answer, like any string a later worker may return, as "the worker can hear the bot
+now" (`perform_reachability_probe`), not as a failure.
+
+The contract for a worker that implements it, fixed now because the name is permanent: a worker may
+implement `synthesia.reachability_probe`. If it does, it answers it, with any payload, only once it has
+bound the calling bot's identity and will accept its streams. The request carries an empty payload. The
+method must have no other effect: no flush, no barge-in, no playback event. The plugin sends it at the
+start of every session.
 
 **Unknown error code.** A `code` the plugin has never seen maps to `ErrorType.UNKNOWN` with the
 Synthesia API's `detail` preserved verbatim, never to a status-derived guess. A new code from the API

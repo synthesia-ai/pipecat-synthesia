@@ -187,9 +187,9 @@ class AvatarSession(ABC):
         """
         return None
 
-    # False while the session holds the bot's audio back: after an *early start*, from a retry of the
-    # session request until the request settles, because the retry's avatar worker may replace the one in
-    # the room.
+    # False while the session holds the bot's audio back. The LiveKit session holds it until its *reachability
+    # probe* has finished, and, after an *early start*, from a retry of the session request until the request
+    # settles, because the retry's avatar worker may replace the one in the room.
     # The service's send loop leaves queued audio queued meanwhile. The default never holds.
     @property
     def sending(self) -> bool:

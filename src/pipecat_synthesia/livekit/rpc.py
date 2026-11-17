@@ -1,4 +1,5 @@
-"""The playback event handlers, and the RPCs the bot calls on the avatar worker (clear buffer, swap)."""
+"""The playback event handlers, and the RPCs the bot calls on the avatar worker (clear buffer, swap, and the
+*reachability probe*)."""
 
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from pipecat_synthesia.protocol import (
     RPC_HANDLER_RESPONSE,
     RPC_PLAYBACK_FINISHED,
     RPC_PLAYBACK_STARTED,
+    RPC_REACHABILITY_PROBE,
     RPC_SWAP_AVATAR,
     SWAP_DEFAULT,
     TOKEN_ATTR_PUBLISH_ON_BEHALF,
@@ -163,6 +165,36 @@ async def perform_clear_buffer(
         )
         return False
     return resp == RPC_HANDLER_RESPONSE
+
+
+async def perform_reachability_probe(
+    participant: LocalParticipantLike, *, avatar_identity: str, within: float
+) -> None:
+    """The *reachability probe*: one request, acknowledged within ``within`` seconds or not at all.
+
+    Returns once the avatar worker has answered: any string, or LiveKit's ``UNSUPPORTED_METHOD``, which is
+    what a worker that doesn't implement the method answers. Either shows its connection knows the bot.
+    ``within`` is the acknowledgement allowance, so one request covers the whole wait: a request sent before
+    the worker knows the bot arrives late rather than never. After a late acknowledgement rtc waits the full
+    ``response_timeout`` again; what ends an acknowledged request with no answer is the worker's rtc
+    answering RESPONSE_TIMEOUT at its 1 s handler floor (see `RPC_ACK_SECS`), and the outer bound caps the
+    whole call at ``within + 1.5``. Raises what rtc raises, or `TimeoutError`, when there was no answer; the
+    caller decides what that means.
+    """
+    try:
+        await asyncio.wait_for(
+            participant.perform_rpc(
+                destination_identity=avatar_identity,
+                method=RPC_REACHABILITY_PROBE,
+                payload="",
+                response_timeout=within + 1.0,
+                max_round_trip_latency=within,
+            ),
+            within + 1.5,
+        )
+    except lk_rtc.RpcError as exc:
+        if exc.code != lk_rtc.RpcError.ErrorCode.UNSUPPORTED_METHOD:
+            raise
 
 
 async def perform_swap_avatar(

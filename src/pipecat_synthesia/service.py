@@ -990,8 +990,9 @@ class SynthesiaVideoService(AIService):
         metrics.room_connected = timings.room_connected
         metrics.session_requested = timings.session_requested
         metrics.avatar_joined = timings.avatar_joined
-        # Audio flows from here. After an *early start* the 201 is still on its way: what needs its session
-        # id (the metrics' ids, the log lines, on_avatar_connected and on_avatar_ready) waits for it.
+        # Audio flows from here, once the session's *reachability probe* has finished. After an *early start*
+        # the 201 is still on its way: what needs its session id (the metrics' ids, the log lines,
+        # on_avatar_connected and on_avatar_ready) waits for it.
         self._session_active.set()
         try:
             # The *launch timeout* bounds the session request too, so what is left of it bounds the wait for a
@@ -1164,8 +1165,9 @@ class SynthesiaVideoService(AIService):
                 self._drained.set()  # a graceful stop's drain has nothing left to wait for
                 return
             if isinstance(item, AudioChunk) and not session.sending:
-                # Audio held after an *early start* whose session request was retried, until the request
-                # settles (its 201, or its failure) or the session closes; during a graceful stop, the drain
+                # Audio held until the session's *reachability probe* has finished, and after an *early
+                # start* whose session request was retried, until the request settles (its 201, or its
+                # failure); either ends when the session closes, and during a graceful stop the drain
                 # timeout bounds the wait. Only audio: an utterance end, a stop's final one included, still
                 # passes. The chunk stays queued, so the voice-only handover or an interruption still finds
                 # it, and it counts as sent only once it is. A failure that ends the launch can wake this loop

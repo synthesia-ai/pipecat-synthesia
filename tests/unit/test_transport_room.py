@@ -71,6 +71,7 @@ from tests.harness import make_service
 from tests.support.callbacks import CallbackRecorder, make_launch_context
 from tests.support.secrets import LK_API_SECRET, LK_TOKEN_MARKER, assert_no_secrets
 from tests.support.waiting import until
+from tests.unit._session_rig import script_the_probe_answer
 
 AVATAR = DEFAULT_AVATAR_IDENTITY
 BOT = "pipecat-bot"
@@ -152,6 +153,14 @@ def publication(avatar: FakeRemoteParticipant, sid: str) -> FakeTrackPublication
     return cast(FakeTrackPublication, avatar.track_publications[sid])
 
 
+def bot_participant() -> FakeLocalParticipant:
+    """The bot's own participant, with the answer today's avatar worker gives the reachability probe, which
+    every launched session sends."""
+    participant = FakeLocalParticipant(BOT)
+    script_the_probe_answer(participant)
+    return participant
+
+
 class Rig:
     """A connected bot transport, its room, the avatar in it, and the adapter under test."""
 
@@ -164,7 +173,7 @@ class Rig:
         transport: FakeLiveKitTransport | None = None,
         **adapter_kwargs: Any,
     ) -> None:
-        self.participant = FakeLocalParticipant(BOT)
+        self.participant = bot_participant()
         self.room = FakeRoom(ROOM, local_participant=self.participant)
         self.transport = transport or FakeLiveKitTransport(
             room=self.room, token=token, participant_id=participant_id
@@ -495,7 +504,7 @@ async def test_api_key_mismatch_warns_once_without_either_key(
     """A bot token signed with a different API key than the credentials that mint the avatar token draws
     one warning, at construction, and none again at launch. A warning, not an error: one LiveKit project
     can have several keys. Neither key appears in any log line, not even in part (*redaction rule*)."""
-    room = FakeRoom(ROOM, local_participant=FakeLocalParticipant(BOT))
+    room = FakeRoom(ROOM, local_participant=bot_participant())
     transport = FakeLiveKitTransport(room=room, token=bot_token_signed_by(BOT_API_KEY), participant_id=BOT)
     rig = Rig(transport=transport, credentials=LiveKitCredentials(MINTING_API_KEY, LK_API_SECRET))
     rig.room, rig.participant = room, cast(FakeLocalParticipant, room.local_participant)
@@ -647,7 +656,7 @@ async def test_failing_mute_still_unsubscribes_video(
         async def mute_participant(self, participant_id: str) -> None:
             raise RuntimeError("ffi gone")
 
-    room = FakeRoom(ROOM, local_participant=FakeLocalParticipant(BOT))
+    room = FakeRoom(ROOM, local_participant=bot_participant())
     rig = Rig(transport=ExplodingMute(room=room, participant_id=BOT), avatar_present=False)
     rig.room = room
     rig.participant = cast(FakeLocalParticipant, room.local_participant)
@@ -679,7 +688,7 @@ async def test_launch_cancelled_after_session_launch_closes_the_session() -> Non
             await gate.wait()
             await super().mute_participant(participant_id)
 
-    room = FakeRoom(ROOM, local_participant=FakeLocalParticipant(BOT))
+    room = FakeRoom(ROOM, local_participant=bot_participant())
     rig = Rig(transport=BlockingMute(room=room, participant_id=BOT))
     rig.room = room
     rig.participant = cast(FakeLocalParticipant, room.local_participant)

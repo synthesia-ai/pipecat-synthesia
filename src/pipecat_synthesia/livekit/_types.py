@@ -31,6 +31,14 @@ CLEAR_BUFFER_SECS = 2.0
 # rare relay retry in LiveKit Cloud, for which rtc's own default allows 7 s) fails the RPC with
 # CONNECTION_TIMEOUT.
 RPC_ACK_SECS = 2.0
+# *reachability probe*: how long the first audio waits for the avatar worker to acknowledge the probe. Until
+# the worker's LiveKit connection knows the bot, the bot's byte streams were seen never to reach the worker,
+# and its RPCs to arrive late. Measured live, the worker learned of the bot up to 0.9 s after publishing its
+# video, and answered 0.18-0.95 s after the session went active: this is about three times the slowest. Past
+# it the audio is sent anyway. The whole call is bounded at this plus 1.5 s (see
+# `perform_reachability_probe`). A graceful stop's single 5 s default deadline covers both the drain and the
+# last playback, so a goodbye queued behind an unanswered probe keeps only what is left of it.
+REACHABILITY_PROBE_SECS = 3.0
 ROOM_CONNECT_SECS = 15.0  # the bot's connect to a private room
 ROOM_CREATE_SECS = 10.0
 ROOM_DISCONNECT_SECS = 5.0
