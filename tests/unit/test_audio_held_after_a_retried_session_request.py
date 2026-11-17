@@ -14,7 +14,8 @@ The hold sits in the service's send loop: a held item stays queued. What this fi
 * a held chunk does not count as sent: the bot is not reported speaking over the hold;
 * during a graceful stop the hold still applies, until the request settles: the goodbye reaches the worker
   that stays after a replacement, goes to the avatar in the room when the request fails (even after the
-  launch timeout ran out during the stop), and is lost if the request is still out when the drain times out.
+  launch timeout ran out during the stop), and is lost if the request is still out when the drain times out;
+* with the *reachability probe* still out as well, audio waits for both holds, whichever ends first.
 
 Runs the real `LiveKitAvatarSession` on the session rig behind the service; the launch id is pinned so the
 avatar in the room is this launch's.
@@ -24,9 +25,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
+from livekit import rtc as lk_rtc
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
@@ -43,15 +46,17 @@ from pipecat_synthesia.protocol import (
     RPC_HANDLER_RESPONSE,
     RPC_PLAYBACK_FINISHED,
     RPC_PLAYBACK_STARTED,
+    RPC_REACHABILITY_PROBE,
     TOKEN_ATTR_LAUNCH,
 )
 from pipecat_synthesia.service import ServiceState
+from tests.fakes.fake_rtc import ack_when
 from tests.fakes.fake_session_api import FakeSessionApiClient
 from tests.harness import Harness, bidirectional_pipeline, make_service
 from tests.support.events import EventRecorder
 from tests.support.frames import count, frames_of
 from tests.support.waiting import until
-from tests.unit._service_helpers import AUDIO_1, AUDIO_2, AUDIO_3, processed, tts_audio
+from tests.unit._service_helpers import AUDIO_1, AUDIO_2, AUDIO_3, processed, records_at, tts_audio
 from tests.unit._session_rig import AVATAR, Rig, SessionRigRoom, make_avatar
 
 LAUNCH = "0123456789abcdef"
@@ -65,11 +70,14 @@ def _launch_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(session_module, "secrets", SimpleNamespace(token_hex=lambda _nbytes: LAUNCH))
 
 
-def _retried_rig(*, error: BaseException | None = None) -> tuple[Rig, asyncio.Event, asyncio.Event]:
-    """This launch's avatar already publishing (an early start); the 201 and the retry each held."""
+def _retried_rig(
+    *, error: BaseException | None = None, probe_answer: object | None = None
+) -> tuple[Rig, asyncio.Event, asyncio.Event]:
+    """This launch's avatar already publishing (an early start); the 201 and the retry each held. The
+    reachability probe is answered as the rig answers it unless `probe_answer` says otherwise."""
     created, retry = asyncio.Event(), asyncio.Event()
     api = FakeSessionApiClient(gate=created, retries=1, retry_gate=retry, error=error)
-    rig = Rig(api=api, attributes={TOKEN_ATTR_LAUNCH: LAUNCH})
+    rig = Rig(api=api, attributes={TOKEN_ATTR_LAUNCH: LAUNCH}, probe_answer=probe_answer)
     rig.participant.script_rpc(RPC_CLEAR_BUFFER, RPC_HANDLER_RESPONSE)
     return rig, created, retry
 
@@ -340,3 +348,51 @@ async def test_a_failed_request_sends_at_most_one_chunk_on_a_stream_already_open
     assert len(rig.participant.streams) == 1, "the held chunks needed no new stream"
     assert len(rig.participant.streams[0].writes) <= 2, "more than one chunk reached the abandoned avatar"
     assert [f.audio for f in frames_of(h.down, TTSAudioRawFrame)] == [AUDIO_2, AUDIO_3]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("released_first", ["the-probe", "the-request"])
+async def test_audio_waits_for_both_holds_whichever_ends_first(
+    released_first: str, caplog_loguru: pytest.LogCaptureFixture
+) -> None:
+    """After the early start the reachability probe is still out when the session request is retried, so two
+    holds are on. Once either has ended, audio queued then still waits for the other, and goes out, once,
+    when that one ends too.
+
+    Sabotage: `sending` reads only one of the two holds. Audio then goes out after the first release in one of
+    the two orders."""
+    learned = asyncio.Event()
+    unsupported = lk_rtc.RpcError(lk_rtc.RpcError.ErrorCode.UNSUPPORTED_METHOD, "Method not supported")
+    rig, created, retry = _retried_rig(probe_answer=ack_when(learned, unsupported))
+    service = make_service(SessionRigRoom(rig), stop_drain_timeout=0.2)
+    rec = EventRecorder(service)
+
+    async with bidirectional_pipeline(service) as h:
+        await until(lambda: service.state is ServiceState.SESSION_ACTIVE, what="the early start")
+        await until(
+            lambda: any(c["method"] == RPC_REACHABILITY_PROBE for c in rig.participant.perform_rpc_calls),
+            what="the reachability probe",
+        )
+        retry.set()
+        await until(lambda: rig.api.retries_reported == 1, what="the retry")
+
+        if released_first == "the-probe":
+            learned.set()
+            await until(
+                lambda: bool(records_at(caplog_loguru, logging.INFO, "reachability probe")),
+                what="the probe's answer",
+            )
+        else:
+            created.set()  # the 201 settles the request
+            await rec.wait("on_avatar_connected")
+        await _utterance(h, "c1", AUDIO_1)
+        await processed(h, "c1 queued")
+        await asyncio.sleep(NOTHING_HAPPENS)
+        assert not rig.participant.streams, "audio went out while the other hold was still on"
+
+        if released_first == "the-probe":
+            created.set()
+        else:
+            learned.set()
+        await until(lambda: bool(rig.participant.streams) and rig.participant.streams[0].closed, what="c1")
+        assert [s.data for s in rig.participant.streams] == [AUDIO_1]

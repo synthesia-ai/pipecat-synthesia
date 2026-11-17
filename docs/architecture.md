@@ -102,8 +102,8 @@ when the session request fails once the session is already active.
    interruption*).
    - *Early start*: if this launch's avatar publishes its video before the 201, the launch finishes
      without waiting for the 201, which typically trails the video by about half a second.
-2. **Session active.** The send loop starts writing the send queue to the worker, one byte stream per
-   utterance. The service fires `on_avatar_connected` once the 201 is in, which after an early start is
+2. **Session active.** The send loop starts writing the send queue to the worker once the *reachability
+   probe* has finished, normally within a second, one byte stream per utterance. The service fires `on_avatar_connected` once the 201 is in, which after an early start is
    just after; `on_avatar_ready` fires after it, once every session avatar is prepared.
 3. **End.** The pipeline stops or is cancelled, or the avatar leaves.
    - A graceful stop first lets the send queue **drain** and the last utterance finish playing, for up
@@ -216,8 +216,8 @@ A term may be one word or several. Terms marked *(rule)* are stated in full unde
 - **join**, **join wait**: the avatar participant arriving in a room, and the wait for it after the
   session is created. The bot *connects* to a room; the avatar *joins* it.
 - **session active** (`ServiceState.SESSION_ACTIVE`): the avatar participant has joined and audio can
-  be sent to it. It does not mean that video is flowing yet, or that every avatar is ready, or, after an
-  *early start*, that the 201 has arrived.
+  be sent to it, once the *reachability probe* has finished. It does not mean that video is flowing yet,
+  or that every avatar is ready, or, after an *early start*, that the 201 has arrived.
 - **ready**: only ever *avatar ready* (see Avatars) or Pipecat's *transport ready*
   (`OutputTransportReadyFrame`).
 - **leave**, **leave reason**: the avatar participant left, or it stopped publishing video, or the bot
@@ -262,6 +262,11 @@ A term may be one word or several. Terms marked *(rule)* are stated in full unde
 - **pre-launch audio**: speech that arrives before the session is active. It waits in the send queue,
   up to a cap, dropping the oldest audio first, and the amount dropped is counted in
   `prelaunch_dropped_bytes`.
+- **reachability probe**: one request (`synthesia.reachability_probe`) the session sends the avatar
+  worker as the launch ends, before any audio. Its answer shows that the worker's LiveKit connection knows
+  the bot. The send loop holds audio until the probe has finished: normally within a second, otherwise
+  after about `REACHABILITY_PROBE_SECS` (3 s, the acknowledgement bound; the whole call is capped at 4.5 s),
+  when it sends anyway with one warning *(rule)*.
 - **idle close**: ending an utterance after 1 s with no new chunk, for TTS services that never send
   `TTSStoppedFrame`.
 - **orphaned open**: a byte-stream open whose caller was cancelled mid-flight. It must still be closed.
@@ -510,6 +515,25 @@ connect. If the connect fails after the request went out, the request is abandon
 avatar worker may already have joined, and it ends that session itself when the bot never arrives. A
 relayed join does not overlap; it registers the handlers, then sends the request.
 (`LiveKitAvatarSession.launch_while_connecting`, `LiveKitTransportRoom.launch`)
+
+**reachability probe.** As the launch ends, the session sends the avatar worker one
+`synthesia.reachability_probe` request, and holds the bot's audio until it is answered, or for about
+`REACHABILITY_PROBE_SECS` (3 s, the acknowledgement bound; the whole call is capped at 4.5 s).
+- *Why:* on LiveKit Cloud, the worker's connection was measured learning of the bot up to 0.9 s after
+  the worker published its video. Byte streams sent before then were never played, while requests sent
+  then were answered late. So an answered request is taken to mean the next stream will arrive.
+- *A method no worker implements:* LiveKit answers it with `UNSUPPORTED_METHOD`, which counts as an
+  answer, and no worker code runs. A clear buffer would also be answered, but a worker that has bound the
+  bot treats it as a barge-in even when nothing is playing. A worker may implement the method later,
+  answering once it has bound the bot.
+- *One request:* its acknowledgement allowance is the whole bound.
+- *Fail open:* with no answer, the audio is sent anyway, with one warning.
+- *The hold is the probe's task:* `sending` is False until the task has finished, however it
+  finishes, so the close only cancels it.
+- *Rejected:* resending when no `playback_started` comes (a held copy and the resend would both play);
+  an unmeasured fixed delay.
+
+(`LiveKitAvatarSession._probe_reachability`, `perform_reachability_probe`)
 
 **unprefixed ids on the wire.** Avatar ids carry the `av_` prefix everywhere in the package and its
 API. Only `swapAvatar` payloads and `avatar_status` keys use the unprefixed id, because the worker

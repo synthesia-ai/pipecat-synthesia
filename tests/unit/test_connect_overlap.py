@@ -39,6 +39,7 @@ from pipecat_synthesia.protocol import (
     RPC_HANDLER_RESPONSE,
     RPC_PLAYBACK_FINISHED,
     RPC_PLAYBACK_STARTED,
+    RPC_REACHABILITY_PROBE,
     TOKEN_ATTR_PUBLISH_ON_BEHALF,
 )
 from tests.fakes.fake_rtc import FakeLocalParticipant, FakeRemoteParticipant, FakeRoom
@@ -47,7 +48,7 @@ from tests.fakes.fake_transport import FakeLiveKitTransport
 from tests.support.callbacks import CallbackRecorder, make_launch_context
 from tests.support.secrets import LK_API_SECRET, LK_TOKEN_MARKER
 from tests.support.waiting import until
-from tests.unit._session_rig import make_avatar, settle
+from tests.unit._session_rig import make_avatar, script_the_probe_answer, settle
 
 AVATAR = DEFAULT_AVATAR_IDENTITY
 BOT = "pipecat-bot"
@@ -111,6 +112,7 @@ class Rig:
         **adapter_kwargs: Any,
     ) -> None:
         self.participant = FakeLocalParticipant(BOT)
+        script_the_probe_answer(self.participant)
         self.room = FakeRoom(room_name, local_participant=self.participant)
         self.transport = FakeLiveKitTransport(
             room=self.room, token=token or bot_token(), participant_id=BOT if connected else ""
@@ -223,6 +225,22 @@ async def test_the_playback_handlers_answer_before_the_launch_returns() -> None:
         )
         await until(
             lambda: rig.rec.started == 1 and rig.rec.finished == [(1.5, False)], what="both callbacks"
+        )
+    finally:
+        await session.aclose()
+    rig.assert_torn_down()
+
+
+async def test_a_session_launched_while_connecting_sends_the_reachability_probe() -> None:
+    """Both launch orders end in the same step, so a session launched in a *connect overlap* sends the avatar
+    worker the reachability probe too, as its launch ends, and holds the bot's audio until it has finished."""
+    rig = Rig()
+    session = await launch_through_the_join(rig)
+    try:
+        calls = rig.participant.perform_rpc_calls
+        await until(
+            lambda: any(call["method"] == RPC_REACHABILITY_PROBE for call in calls),
+            what="the reachability probe",
         )
     finally:
         await session.aclose()

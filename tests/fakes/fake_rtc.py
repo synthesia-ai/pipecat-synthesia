@@ -2,8 +2,8 @@
 
 `FakeByteStreamWriter`, `FakeLocalParticipant`, `FakeRemoteParticipant`, `FakeRoom` and
 `FakeTrackPublication` are enough to drive `UtteranceStreamer`, `PlaybackRpcHandlers`,
-`perform_clear_buffer`, `perform_swap_avatar`, `AvatarReadiness` and `LiveKitAvatarSession` with no
-LiveKit server. Read this docstring before using them.
+`perform_clear_buffer`, `perform_reachability_probe`, `perform_swap_avatar`, `AvatarReadiness` and
+`LiveKitAvatarSession` with no LiveKit server. Read this docstring before using them.
 
 **These fakes record; they do not decide.** The only behaviour they model is behaviour read in rtc's
 source (livekit rtc 1.1.19), and each such rule has a comment beside it:

@@ -7,6 +7,13 @@ Not a test module (no `test_` prefix). `LiveKitAvatarSession` is internal, but i
 the avatar session: both room adapters only build its `RoomHandle` and hand over. Every helper that moves
 the fake room does it in rtc's order: a participant is added before `participant_connected` is emitted,
 and removed (with its reason set) before `participant_disconnected` is.
+
+Every launched session sends the avatar worker the *reachability probe* as its launch ends, as an RPC of
+its own (`RPC_REACHABILITY_PROBE`), and holds its audio until the probe has finished. The rig scripts the
+answer today's worker gives, `UNSUPPORTED_METHOD`, on its participant, whether the test passed its own
+`participant=` or not; `Rig(probe_answer=...)` scripts another, for example `ack_when(event, ...)` for a
+worker that learns of the bot late. Other setups script it with `script_the_probe_answer`. A test that reads
+`perform_rpc_calls` reads them through `rpc_calls_without_the_probe`.
 """
 
 from __future__ import annotations
@@ -24,7 +31,7 @@ from livekit import rtc as lk_rtc
 from pipecat_synthesia.livekit._types import AvatarTokenSource, RoomHandle
 from pipecat_synthesia.livekit.session import LiveKitAvatarSession
 from pipecat_synthesia.livekit.token import DEFAULT_AVATAR_IDENTITY, DEFAULT_AVATAR_NAME
-from pipecat_synthesia.protocol import ATTR_AVATAR_READY, ATTR_AVATAR_STATUS
+from pipecat_synthesia.protocol import ATTR_AVATAR_READY, ATTR_AVATAR_STATUS, RPC_REACHABILITY_PROBE
 from pipecat_synthesia.room import AvatarRoom, AvatarSession, JoinMode, LaunchContext
 from tests.fakes.fake_rtc import (
     FakeLocalParticipant,
@@ -102,6 +109,22 @@ def make_avatar(
     )
 
 
+def script_the_probe_answer(participant: FakeLocalParticipant, answer: object | None = None) -> None:
+    """Script what the avatar worker answers the reachability probe on `participant`. By default that is
+    what today's worker answers, LiveKit's `UNSUPPORTED_METHOD`, built fresh so no two tests share one
+    exception."""
+    if answer is None:
+        answer = lk_rtc.RpcError(
+            lk_rtc.RpcError.ErrorCode.UNSUPPORTED_METHOD, "Method not supported at destination"
+        )
+    participant.script_rpc(RPC_REACHABILITY_PROBE, answer)
+
+
+def rpc_calls_without_the_probe(participant: FakeLocalParticipant) -> list[dict[str, Any]]:
+    """`perform_rpc_calls` minus the reachability probe, which every launched session sends."""
+    return [call for call in participant.perform_rpc_calls if call["method"] != RPC_REACHABILITY_PROBE]
+
+
 class Rig:
     """One fake room, its handle, a fake API and a callback recorder."""
 
@@ -117,8 +140,10 @@ class Rig:
         recorder: CallbackRecorder | None = None,
         token_source: AvatarTokenSource | None = None,
         avatar_name: str = DEFAULT_AVATAR_NAME,
+        probe_answer: object | None = None,
     ) -> None:
         self.participant = participant or FakeLocalParticipant(BOT)
+        script_the_probe_answer(self.participant, probe_answer)
         self.room = FakeRoom(ROOM, local_participant=self.participant)
         self.delete_calls = 0
 

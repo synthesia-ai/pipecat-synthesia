@@ -294,8 +294,9 @@ reply still being produced when the user speaks again. Three consequences:
   interrupts only when a user turn starts, so nothing stops it until their next one.
 - Once the session is active, an interruption clears audio the avatar has not begun playing, as any
   interruption of unplayed audio does in Pipecat. The session usually becomes active as the avatar's
-  video appears, so a user who starts speaking in the first second or so after seeing the avatar, before
-  its first words play, still cuts off a greeting they have not heard.
+  video appears, so a user who starts speaking in the first second or so, or up to about a second and a
+  half when the avatar worker sees the bot late, after seeing the avatar, before its first words play,
+  still cuts off a greeting they have not heard.
 
 Environment variables are listed in [`.env.example`](https://github.com/synthesia-ai/pipecat-synthesia/blob/main/.env.example).
 

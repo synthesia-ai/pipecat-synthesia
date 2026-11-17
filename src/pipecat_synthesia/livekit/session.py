@@ -45,7 +45,12 @@ from pipecat_synthesia.errors import ErrorType, SynthesiaError
 from pipecat_synthesia.livekit import _types
 from pipecat_synthesia.livekit._rtc import lk_rtc
 from pipecat_synthesia.livekit.readiness import AvatarReadiness
-from pipecat_synthesia.livekit.rpc import PlaybackRpcHandlers, perform_clear_buffer, perform_swap_avatar
+from pipecat_synthesia.livekit.rpc import (
+    PlaybackRpcHandlers,
+    perform_clear_buffer,
+    perform_reachability_probe,
+    perform_swap_avatar,
+)
 from pipecat_synthesia.livekit.utterance_streamer import DEFAULT_IDLE_CLOSE_SECS, UtteranceStreamer
 from pipecat_synthesia.protocol import (
     AVATAR_STATE_READY,
@@ -169,6 +174,9 @@ class LiveKitAvatarSession(AvatarSession):
         self._request_retried = False
         self._sending = asyncio.Event()
         self._sending.set()
+        # The *reachability probe*, started as the launch ends: audio is held until this task has finished,
+        # however it finishes. None until then.
+        self._probe: asyncio.Task[None] | None = None
 
     @classmethod
     async def launch(
@@ -432,6 +440,11 @@ class LiveKitAvatarSession(AvatarSession):
             idle_close_secs=DEFAULT_IDLE_CLOSE_SECS,
             log=log,
         )
+        # *reachability probe*: started as the launch ends, not at the first audio, so its round trip overlaps
+        # the bot's first reply.
+        self._probe = asyncio.get_running_loop().create_task(
+            self._probe_reachability(), name="synthesia-reachability-probe"
+        )
 
     def _take_created(self, created: SessionCreated) -> None:
         """Stamp the 201 on the session as it lands, whether or not anything waits for it then: its session
@@ -608,6 +621,30 @@ class LiveKitAvatarSession(AvatarSession):
 
     def _on_room_disconnected(self, reason: Any) -> None:
         self._declare_left(ROOM_CONNECTION_LOST)
+
+    # ------------------------------------------------------------------ reachability probe
+
+    async def _probe_reachability(self) -> None:
+        """The *reachability probe*. Never raises; the close cancels it. `sending` is False until it has
+        finished."""
+        within = _types.REACHABILITY_PROBE_SECS  # read at call time, so tests can shrink it
+        started = monotonic()
+        try:
+            await perform_reachability_probe(
+                self._participant, avatar_identity=self._avatar_identity, within=within
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if self._alive:  # after a leave, or once closing, a failure means nothing
+                self._log.warning(
+                    f"the reachability probe failed after {(monotonic() - started) * 1000:.0f} ms "
+                    f"({describe_exception(exc)}); sending anyway, so the first audio may not play"
+                )
+            return
+        if self._alive:
+            elapsed_ms = (monotonic() - started) * 1000
+            self._log.info(f"the avatar worker answered the reachability probe in {elapsed_ms:.0f} ms")
 
     # ------------------------------------------------------------------ leave detection
 
@@ -809,9 +846,13 @@ class LiveKitAvatarSession(AvatarSession):
 
     @property
     def sending(self) -> bool:
-        return self._sending.is_set()
+        # Two holds: the retry hold (`_on_request_retry`), and the *reachability probe* until its task
+        # finishes.
+        return self._sending.is_set() and (self._probe is None or self._probe.done())
 
     async def wait_sending(self) -> None:
+        if self._probe is not None:
+            await asyncio.wait({self._probe})  # never raises, and never cancels the probe
         await self._sending.wait()
 
     async def send_audio(self, pcm_s16le: bytes, sample_rate: int, num_channels: int) -> None:
@@ -903,6 +944,7 @@ class LiveKitAvatarSession(AvatarSession):
         # a replacement grace already running cannot report a leave during the awaits below.
         self._alive = False
         self._sending.set()  # nothing waits on a hold once the session is closing
+        self._cancel_probe()
         self._cancel_grace()
         # after an *early start* the 201 may still be on its way; nothing is left waiting for it
         await self._cancel_request()
@@ -933,6 +975,7 @@ class LiveKitAvatarSession(AvatarSession):
         """Undo whatever the launch had done so far. Never raises; nothing ever cancels it."""
         try:
             self._alive = False
+            self._cancel_probe()
             self._unregister_handlers()
             self._remove_listeners()
             self._cancel_grace()
@@ -959,6 +1002,12 @@ class LiveKitAvatarSession(AvatarSession):
             # Retrieved, so the event loop does not report it again: the launch has failed anyway, with this
             # error or one that replaced it.
             request.exception()
+
+    def _cancel_probe(self) -> None:
+        """Stop the *reachability probe*. Its task then finishes, which releases the hold it keeps on
+        `sending`."""
+        if self._probe is not None:
+            self._probe.cancel()
 
     def _unregister_handlers(self) -> None:
         if self._handlers is None:

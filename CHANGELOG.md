@@ -5,6 +5,12 @@ only in a new major version. Breaking changes are marked **BREAKING** (see `RELE
 
 ## Unreleased
 
+- The greeting is no longer lost when the user is in the room before the bot starts. The avatar worker can
+  take up to about a second after its video appears to see the bot, and audio sent before then never
+  reached it. The first audio now waits for the worker to answer one request (the *reachability probe*):
+  about 0.2 s when the worker has already seen the bot, about 3 s at most, after which it is sent anyway
+  with a warning.
+
 ## 1.0.0 - 2026-11-12
 
 First public release, and the first on PyPI. It follows a private beta whose releases, 0.1.0b1 to 0.1.0b4, were

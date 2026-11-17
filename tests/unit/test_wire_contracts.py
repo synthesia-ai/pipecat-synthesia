@@ -41,6 +41,8 @@ WIRE_VALUES: dict[str, object] = {
     "TOKEN_ATTR_CLIENT": "synthesia.client",
     "TOKEN_ATTR_JOIN_MODE": "synthesia.join_mode",
     "TOKEN_ATTR_LAUNCH": "synthesia.launch",
+    # Synthesia-owned RPC: the reachability probe
+    "RPC_REACHABILITY_PROBE": "synthesia.reachability_probe",
     "PROTOCOL_VERSION": "1",
     "JOIN_MODE_DIRECT": "direct",
     "JOIN_MODE_RELAYED": "relayed",
