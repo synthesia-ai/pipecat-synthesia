@@ -266,7 +266,8 @@ async def test_a_retry_after_an_early_start_holds_sending_until_the_201_lands(la
     )
     session = await asyncio.wait_for(rig.launch(), timeout=5)
     try:
-        assert session.sending
+        # the reachability probe's hold, which the rig's worker answers at once, ends first
+        await until(lambda: session.sending, what="the reachability probe's answer")
         await session.send_audio(PCM, 24000, 1)
         assert len(rig.participant.streams) == 1, "audio flows after the early start"
 

@@ -1,4 +1,5 @@
-"""Fake-vs-real conformance for the wire layer (`UtteranceStreamer`, the playback RPCs, clear buffer, swap).
+"""Fake-vs-real conformance for the wire layer (`UtteranceStreamer`, the playback RPCs, clear buffer, swap,
+the reachability probe).
 
 Everything in `tests/unit/test_utterance_streamer.py`, `test_rpc.py` and `test_readiness.py` is proved
 against `tests/fakes/fake_rtc.py`, which models real rtc from reading its source. These tests prove the
@@ -20,7 +21,12 @@ import pytest
 from livekit import rtc as lk_rtc
 from loguru import logger
 
-from pipecat_synthesia.livekit.rpc import PlaybackRpcHandlers, perform_clear_buffer, perform_swap_avatar
+from pipecat_synthesia.livekit.rpc import (
+    PlaybackRpcHandlers,
+    perform_clear_buffer,
+    perform_reachability_probe,
+    perform_swap_avatar,
+)
 from pipecat_synthesia.livekit.utterance_streamer import UtteranceStreamer
 from pipecat_synthesia.protocol import (
     ATTR_AVATAR_READY,
@@ -362,3 +368,27 @@ async def test_swap_reply_window_matches_rtc(livekit_server, room_name) -> None:
 
     assert real == fake_outcomes
     assert real == ("av_b", f"RpcError {int(lk_rtc.RpcError.ErrorCode.RESPONSE_TIMEOUT)}")
+
+
+async def test_a_worker_that_does_not_implement_the_reachability_probe_answers_it(
+    livekit_server, room_name
+) -> None:
+    """`FakeAvatarWorker` registers no `synthesia.reachability_probe`, like every worker today, so real rtc
+    on its side answers `UNSUPPORTED_METHOD`, and `perform_reachability_probe` takes that as the answer and
+    returns. This is the only automated check that a real SDK answers the way the plugin expects; the unit
+    tier scripts the answer."""
+    dev = livekit_server
+    token = mint_dev_token(dev, identity=BOT, room=room_name, kind="agent")
+
+    async with connect_room(dev, token) as room:
+        fake = FakeAvatarWorker.for_bot(dev, room_name=room_name, bot_identity=BOT)
+        await fake.start()
+        try:
+            # as in a launch, the probe goes out once the bot has seen the avatar join
+            await until(
+                lambda: fake.identity in room.remote_participants, timeout=10, what="the avatar in the room"
+            )
+            await perform_reachability_probe(room.local_participant, avatar_identity=fake.identity, within=5)
+            assert fake.clear_buffer_calls == 0, fake.debug_dump()
+        finally:
+            await fake.stop()

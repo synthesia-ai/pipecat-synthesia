@@ -81,6 +81,7 @@ from tests.unit._session_rig import (
     StubTokenSource,
     launched,
     make_avatar,
+    rpc_calls_without_the_probe,
     settle,
     status_attr,
 )
@@ -510,8 +511,9 @@ async def test_send_end_interrupt_sequence() -> None:
         assert second.closed is False
 
         await session.interrupt()
-        assert participant.rpc_events == [(RPC_CLEAR_BUFFER, True)], "clear_buffer before the close"
-        assert participant.perform_rpc_calls[-1]["destination_identity"] == AVATAR
+        clear_buffers = [event for event in participant.rpc_events if event[0] == RPC_CLEAR_BUFFER]
+        assert clear_buffers == [(RPC_CLEAR_BUFFER, True)], "clear_buffer before the close"
+        assert rpc_calls_without_the_probe(participant)[-1]["destination_identity"] == AVATAR
         assert second.closed is True
         assert participant.max_concurrent_open_streams == 1
         assert participant.unclosed_streams() == []
@@ -585,7 +587,7 @@ async def test_swap() -> None:
         )
 
         assert await session.swap_avatar(SWAP_DEFAULT, timeout=5) == "av_a"
-        assert json.loads(participant.perform_rpc_calls[-1]["payload"]) == {"avatar_id": "a"}
+        assert json.loads(rpc_calls_without_the_probe(participant)[-1]["payload"]) == {"avatar_id": "a"}
         assert session.active_avatar_id == "av_a"
 
         # the worker's error body: typed AVATAR_SWAP_FAILED with its code, stamped
@@ -613,7 +615,7 @@ async def test_swap_to_a_failed_avatar_fails_without_an_rpc() -> None:
         assert excinfo.value.type is ErrorType.AVATAR_SWAP_FAILED
         assert excinfo.value.code == SWAP_ERROR_CODE_AVATAR_FAILED
         assert excinfo.value.session_id == "ses_fake"
-        assert rig.participant.perform_rpc_calls == []
+        assert rpc_calls_without_the_probe(rig.participant) == []
 
 
 async def test_a_swap_to_a_preparing_avatar_waits_then_swaps_once_it_is_ready() -> None:
@@ -623,7 +625,7 @@ async def test_a_swap_to_a_preparing_avatar_waits_then_swaps_once_it_is_ready() 
         swap = asyncio.ensure_future(session.swap_avatar("av_b", timeout=LONG_TIMEOUT))
         try:
             await asyncio.sleep(0)  # one loop turn: the swap reaches its readiness wait
-            assert rig.participant.perform_rpc_calls == [], "no RPC while b is preparing"
+            assert rpc_calls_without_the_probe(rig.participant) == [], "no RPC while b is preparing"
 
             rig.change_attributes(rig.avatar, ALL_READY)
             await until(swap.done, what="the swap to go ahead once b is ready")
@@ -631,7 +633,7 @@ async def test_a_swap_to_a_preparing_avatar_waits_then_swaps_once_it_is_ready() 
             await settle(swap)
 
         assert swap.result() == "av_b"
-        assert json.loads(rig.participant.perform_rpc_calls[-1]["payload"]) == {"avatar_id": "b"}
+        assert json.loads(rpc_calls_without_the_probe(rig.participant)[-1]["payload"]) == {"avatar_id": "b"}
         assert session.active_avatar_id == "av_b"
 
 
@@ -651,7 +653,7 @@ async def test_a_swap_whose_avatar_fails_while_it_waits_is_avatar_swap_failed() 
         assert error.type is ErrorType.AVATAR_SWAP_FAILED
         assert error.code == SWAP_ERROR_CODE_AVATAR_FAILED
         assert error.session_id == SESSION_ID
-        assert rig.participant.perform_rpc_calls == []
+        assert rpc_calls_without_the_probe(rig.participant) == []
         assert session.active_avatar_id == "av_a"
 
 
@@ -667,7 +669,7 @@ async def test_a_swap_to_an_avatar_still_preparing_when_time_runs_out_is_timeout
         assert isinstance(error, SynthesiaError)
         assert error.type is ErrorType.TIMEOUT
         assert error.session_id == SESSION_ID
-        assert rig.participant.perform_rpc_calls == []
+        assert rpc_calls_without_the_probe(rig.participant) == []
 
 
 async def test_a_short_swap_timeout_still_waits_for_readiness_that_arrives_in_time() -> None:
@@ -690,7 +692,7 @@ async def test_a_swap_to_an_avatar_with_no_reported_readiness_goes_straight_to_t
         rig.participant.script_rpc(RPC_SWAP_AVATAR, SWAPPED_TO_B)
 
         assert await session.swap_avatar("av_b", timeout=1.0) == "av_b"
-        assert len(rig.participant.perform_rpc_calls) == 1
+        assert len(rpc_calls_without_the_probe(rig.participant)) == 1
 
 
 async def test_the_swap_rpc_is_bounded_by_the_swap_timeout() -> None:
@@ -699,7 +701,7 @@ async def test_the_swap_rpc_is_bounded_by_the_swap_timeout() -> None:
 
         await session.swap_avatar("av_b", timeout=5.0)
 
-        call = rig.participant.perform_rpc_calls[-1]
+        call = rpc_calls_without_the_probe(rig.participant)[-1]
         assert 0 < call["response_timeout"] <= 5.0
         assert 0 < call["max_round_trip_latency"] <= 5.0
 
@@ -763,7 +765,7 @@ async def test_a_swap_to_an_id_outside_the_session_avatars_is_unknown_avatar(ava
 
         assert excinfo.value.type is ErrorType.UNKNOWN_AVATAR
         assert excinfo.value.session_id == SESSION_ID
-        assert rig.participant.perform_rpc_calls == []
+        assert rpc_calls_without_the_probe(rig.participant) == []
 
 
 # -------------------------------------------------------------------------------------- avatar left
@@ -1226,7 +1228,9 @@ async def test_send_after_left_is_noop(caplog_loguru: pytest.LogCaptureFixture) 
 
         await session.end_utterance()
         await session.interrupt()
-        assert rig.participant.perform_rpc_calls == [], "no clear_buffer to a participant that is gone"
+        assert rpc_calls_without_the_probe(rig.participant) == [], (
+            "no clear_buffer to a participant that is gone"
+        )
 
 
 # ------------------------------------------------------------------------------------ cancellation
@@ -1257,7 +1261,9 @@ async def test_cancelling_an_interruption_during_the_clear_buffer_rpc_propagates
         rig.participant.script_rpc(RPC_CLEAR_BUFFER, never_returns)
         interrupting = asyncio.ensure_future(session.interrupt())
         try:
-            await until(lambda: len(rig.participant.perform_rpc_calls) == 1, what="the clear buffer RPC")
+            await until(
+                lambda: len(rpc_calls_without_the_probe(rig.participant)) == 1, what="the clear buffer RPC"
+            )
             interrupting.cancel()
             await asyncio.wait({interrupting})
         finally:
@@ -1271,7 +1277,7 @@ async def test_cancelling_a_swap_during_its_rpc_propagates() -> None:
         rig.participant.script_rpc(RPC_SWAP_AVATAR, never_returns)
         swapping = asyncio.ensure_future(session.swap_avatar("av_b", timeout=5.0))
         try:
-            await until(lambda: len(rig.participant.perform_rpc_calls) == 1, what="the swap RPC")
+            await until(lambda: len(rpc_calls_without_the_probe(rig.participant)) == 1, what="the swap RPC")
             swapping.cancel()
             await asyncio.wait({swapping})
         finally:

@@ -17,7 +17,9 @@ so no relayed-join test monkeypatches the SDK.
   `server_error()` builds a real one, so the production `except` clause is exercised against the class
   it will actually meet.
 * `Room.connect(url, token, options=...)` raises `rtc.ConnectError`; `FakeConnectingRoom` adds exactly
-  that to `FakeRoom` and nothing else.
+  that to `FakeRoom`, and scripts its participant with the answer today's avatar worker gives the
+  reachability probe, which every launched session sends: LiveKit's `UNSUPPORTED_METHOD`, because no worker
+  registers the method.
 """
 
 from __future__ import annotations
@@ -26,7 +28,9 @@ import asyncio
 from typing import Any
 
 from livekit import api as lk_api
+from livekit import rtc as lk_rtc
 
+from pipecat_synthesia.protocol import RPC_REACHABILITY_PROBE
 from tests.fakes.fake_rtc import FakeLocalParticipant, FakeRoom
 
 __all__ = [
@@ -150,6 +154,10 @@ class FakeConnectingRoom(FakeRoom):
 
     def __init__(self, name: str = "fake-room") -> None:
         super().__init__(name, local_participant=FakeLocalParticipant("pipecat-bot"))
+        unsupported = lk_rtc.RpcError.ErrorCode.UNSUPPORTED_METHOD
+        self.local_participant.script_rpc(
+            RPC_REACHABILITY_PROBE, lk_rtc.RpcError(unsupported, "Method not supported at destination")
+        )
         self.connect_calls: list[dict[str, Any]] = []
         #: Raised by `connect()` instead of connecting.
         self.connect_error: BaseException | None = None

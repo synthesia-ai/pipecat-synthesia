@@ -1,7 +1,9 @@
-"""`PlaybackRpcHandlers`, `perform_clear_buffer`, `perform_swap_avatar`, `error_from_rpc`.
+"""`PlaybackRpcHandlers`, `perform_clear_buffer`, `perform_reachability_probe`, `perform_swap_avatar`,
+`error_from_rpc`.
 
 Both playback handlers are registered, answer with a `str`, never raise, and reject any caller but the
-avatar. `clear_buffer` is bounded and never raises. Every `RpcError` code maps to its own error type
+avatar. `clear_buffer` is bounded and never raises. The reachability probe counts any answer, LiveKit's
+`UNSUPPORTED_METHOD` included, and raises everything else. Every `RpcError` code maps to its own error type
 rather than all to CONNECTION.
 """
 
@@ -23,6 +25,7 @@ from pipecat_synthesia.livekit.rpc import (
     PlaybackRpcHandlers,
     error_from_rpc,
     perform_clear_buffer,
+    perform_reachability_probe,
     perform_swap_avatar,
 )
 from pipecat_synthesia.protocol import (
@@ -31,10 +34,11 @@ from pipecat_synthesia.protocol import (
     RPC_HANDLER_RESPONSE,
     RPC_PLAYBACK_FINISHED,
     RPC_PLAYBACK_STARTED,
+    RPC_REACHABILITY_PROBE,
     RPC_SWAP_AVATAR,
     SWAP_DEFAULT,
 )
-from tests.fakes.fake_rtc import FakeLocalParticipant, never_returns, reply_after
+from tests.fakes.fake_rtc import FakeLocalParticipant, ack_when, never_returns, reply_after
 from tests.support.waiting import until
 
 AVATAR = "synthesia-avatar-agent"
@@ -289,6 +293,70 @@ async def test_a_clear_buffer_answered_well_inside_its_timeout_is_heard() -> Non
     participant.script_rpc(RPC_CLEAR_BUFFER, reply_after(1.25, RPC_HANDLER_RESPONSE))
 
     assert await perform_clear_buffer(participant, avatar_identity=AVATAR, timeout=3.0, log=LOG) is True
+
+
+# --- perform_reachability_probe ------------------------------------------------------------------
+
+
+async def test_the_probe_gives_its_whole_bound_to_the_acknowledgement() -> None:
+    """One request, on its own method, with an empty payload. Its acknowledgement allowance is the whole
+    bound, because a request sent before the worker knows the bot is acknowledged late rather than never;
+    and rtc's answer wait is at least that long, so a late acknowledgement can still be followed by an
+    answer."""
+    participant = FakeLocalParticipant()
+    participant.script_rpc(RPC_REACHABILITY_PROBE, RPC_HANDLER_RESPONSE)
+
+    await perform_reachability_probe(participant, avatar_identity=AVATAR, within=3.0)
+
+    assert len(participant.perform_rpc_calls) == 1
+    call = participant.perform_rpc_calls[0]
+    assert call["destination_identity"] == AVATAR
+    assert call["method"] == RPC_REACHABILITY_PROBE
+    assert call["payload"] == ""
+    assert call["max_round_trip_latency"] == 3.0
+    assert call["response_timeout"] >= 3.0
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param("ok", id="any string"),
+        pytest.param("", id="an empty string"),
+        pytest.param(
+            lk_rtc.RpcError(CODES.UNSUPPORTED_METHOD, "Method not supported at destination"),
+            id="UNSUPPORTED_METHOD",
+        ),
+    ],
+)
+async def test_any_answer_from_the_worker_returns(answer: object) -> None:
+    """Today's workers don't register the method, so LiveKit answers `UNSUPPORTED_METHOD` for them: that is
+    the answer, not a failure. A worker that implements it later may answer anything."""
+    participant = FakeLocalParticipant()
+    participant.script_rpc(RPC_REACHABILITY_PROBE, answer)
+
+    await perform_reachability_probe(participant, avatar_identity=AVATAR, within=3.0)
+
+
+async def test_any_other_rpc_error_is_raised_for_the_caller_to_judge() -> None:
+    participant = FakeLocalParticipant()
+    failure = lk_rtc.RpcError(CODES.APPLICATION_ERROR, "Application error in method handler")
+    participant.script_rpc(RPC_REACHABILITY_PROBE, failure)
+
+    with pytest.raises(lk_rtc.RpcError) as caught:
+        await perform_reachability_probe(participant, avatar_identity=AVATAR, within=3.0)
+    assert caught.value.code == CODES.APPLICATION_ERROR
+
+
+async def test_a_probe_never_acknowledged_is_a_connection_timeout() -> None:
+    """A worker that never learns of the bot never acknowledges: rtc fails the request once the
+    acknowledgement allowance, here the bound, has passed."""
+    participant = FakeLocalParticipant()
+    participant.script_rpc(RPC_REACHABILITY_PROBE, ack_when(asyncio.Event(), RPC_HANDLER_RESPONSE))
+
+    with pytest.raises(lk_rtc.RpcError) as caught:
+        await perform_reachability_probe(participant, avatar_identity=AVATAR, within=0.05)
+    assert caught.value.code == CODES.CONNECTION_TIMEOUT
+    assert len(participant.perform_rpc_calls) == 1
 
 
 # --- perform_swap_avatar -------------------------------------------------------------------------

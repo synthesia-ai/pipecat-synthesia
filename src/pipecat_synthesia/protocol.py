@@ -50,6 +50,10 @@ TOKEN_ATTR_JOIN_MODE = "synthesia.join_mode"  # only on a minted avatar token
 # only on a minted avatar token: a random id per launch, so the session can tell its own avatar from a
 # stale one with the same identity before the 201 (*early start*)
 TOKEN_ATTR_LAUNCH = "synthesia.launch"
+# bot -> worker, payload "". No worker registers it, so LiveKit's SDK on the worker's side answers
+# UNSUPPORTED_METHOD, and only once the worker's connection knows the bot (*reachability probe*). A worker may
+# implement it later, answering once it has bound the bot; any answer counts.
+RPC_REACHABILITY_PROBE = "synthesia.reachability_probe"
 PROTOCOL_VERSION = "1"  # absent attribute on an old client == "1"
 # the join mode, on that token attribute and in the X-Synthesia-Client header (`JoinMode`'s values)
 JOIN_MODE_DIRECT = "direct"
